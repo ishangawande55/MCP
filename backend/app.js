@@ -30,6 +30,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/applications', applicationRoutes);
 app.use('/api/credentials', credentialRoutes);
 
+
 // Health check
 app.get("/", (req, res) => {
   res.send("✅ Municipal Backend API is running");

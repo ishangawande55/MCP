@@ -22,6 +22,6 @@ const requireRole = (...allowedRoles) => {
 
 module.exports = {
   requireRole,
-  requireOfficer: requireRole(USER_ROLES.OFFICER, USER_ROLES.ADMIN),
-  requireAdmin: requireRole(USER_ROLES.ADMIN)
+  requireOfficer: requireRole(USER_ROLES.OFFICER, USER_ROLES.ADMIN, USER_ROLES.COMMISSIONER),
+  requireAdmin: requireRole(USER_ROLES.ADMIN, USER_ROLES.COMMISSIONER) 
 };

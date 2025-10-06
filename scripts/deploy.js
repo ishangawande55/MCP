@@ -3,20 +3,32 @@ const { ethers } = require("hardhat");
 async function main() {
   console.log("🚀 Deploying CredentialRegistry...");
 
-  // Get the first signer (deployer)
-  const [deployer] = await ethers.getSigners();
+  // Get first 4 signers
+  const signers = await ethers.getSigners();
+  const deployer = signers[0];
+  const additionalIssuers = signers.slice(1, 4); // accounts #1, #2, #3
 
-  // Get the contract factory
+  // Get contract factory
   const CredentialRegistry = await ethers.getContractFactory("CredentialRegistry");
 
   // Deploy contract
   const registry = await CredentialRegistry.deploy();
-
-  // Wait for deployment
   await registry.waitForDeployment(); // ethers v6
 
   console.log("✅ CredentialRegistry deployed to:", registry.target);
-  console.log("📝 First authorized issuer:", await deployer.getAddress());
+
+  // Add additional issuers
+  for (const issuer of additionalIssuers) {
+    await registry.addIssuer(await issuer.getAddress());
+    console.log("📝 Authorized issuer added:", await issuer.getAddress());
+  }
+
+  // Show all authorized issuers
+  const allIssuers = [deployer, ...additionalIssuers];
+  console.log("🎯 All authorized issuers:");
+  for (const issuer of allIssuers) {
+    console.log(await issuer.getAddress());
+  }
 }
 
 main()
