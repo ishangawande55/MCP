@@ -1,74 +1,128 @@
 const Application = require('../../models/Application');
 const { APPLICATION_STATUS, APPLICATION_TYPES } = require('../../utils/constants');
 
+/**
+ * Create a new application submitted by a registered APPLICANT.
+ * Only users with role 'APPLICANT' can create applications.
+ */
 const createApplication = async (req, res) => {
   try {
+    const user = req.user; // Auth middleware injects authenticated user
+
+    // --------------------------
+    // 1️⃣ Authorization check
+    // --------------------------
+    if (!user || user.role !== 'APPLICANT') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only applicants can create applications.',
+      });
+    }
+
     const {
       type,
-      applicant,
       birthDetails,
       deathDetails,
       tradeDetails,
       nocDetails,
-      supportingDocuments
+      supportingDocuments,
     } = req.body;
 
-    // Validate application type
+    // --------------------------
+    // 2️⃣ Validate application type
+    // --------------------------
     if (!Object.values(APPLICATION_TYPES).includes(type)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid application type.'
+        message: 'Invalid application type.',
       });
     }
 
-    // Map type → department automatically
+    // --------------------------
+    // 3️⃣ Determine department automatically
+    // --------------------------
     const departmentMap = {
       BIRTH: 'HEALTHCARE',
       DEATH: 'HEALTHCARE',
       TRADE_LICENSE: 'LICENSE',
-      NOC: 'NOC'
+      NOC: 'NOC',
     };
     const department = departmentMap[type];
 
-    // Generate unique application ID
+    // --------------------------
+    // 4️⃣ Generate unique application ID
+    // --------------------------
     const timestamp = Date.now();
     const random = Math.floor(Math.random() * 1000);
     const applicationId = `${type}-${timestamp}-${random}`;
 
-    // Base application data
+    // --------------------------
+    // 5️⃣ Build base application object
+    // --------------------------
     const applicationData = {
       applicationId,
       type,
       department,
-      applicant,
+      applicant: {
+        userId: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone || '',
+        address: user.address || '',
+        did: user.did || null,
+      },
+      userId: user._id, // Reference to applicant
       status: APPLICATION_STATUS.PENDING,
-      supportingDocuments: supportingDocuments || []
+      supportingDocuments: supportingDocuments || [],
+      history: [
+        {
+          action: 'CREATED',
+          by: {
+            id: user._id,
+            name: user.name,
+            did: user.did || null,
+            role: user.role,
+          },
+          at: new Date(),
+          note: 'Application created by applicant',
+        },
+      ],
     };
 
-    // Assign type-specific details
-    let typeDetails = {};
-    if (type === 'BIRTH') {
-      applicationData.birthDetails = birthDetails;
-      typeDetails = { birthDetails };
-    }
-    if (type === 'DEATH') {
-      applicationData.deathDetails = deathDetails;
-      typeDetails = { deathDetails };
-    }
-    if (type === 'TRADE_LICENSE') {
-      applicationData.tradeDetails = tradeDetails;
-      typeDetails = { tradeDetails };
-    }
-    if (type === 'NOC') {
-      applicationData.nocDetails = nocDetails;
-      typeDetails = { nocDetails };
+    // --------------------------
+    // 6️⃣ Add type-specific details
+    // --------------------------
+    switch (type) {
+      case 'BIRTH':
+        applicationData.birthDetails = birthDetails;
+        break;
+      case 'DEATH':
+        applicationData.deathDetails = deathDetails;
+        break;
+      case 'TRADE_LICENSE':
+        applicationData.tradeDetails = tradeDetails;
+        break;
+      case 'NOC':
+        applicationData.nocDetails = nocDetails;
+        break;
     }
 
-    // Save to DB
+    // --------------------------
+    // 7️⃣ Save application to MongoDB
+    // --------------------------
     const application = new Application(applicationData);
     await application.save();
 
-    // Respond with only relevant type-specific details
+    // --------------------------
+    // 8️⃣ Prepare response (include only relevant type-specific details)
+    // --------------------------
+    const typeDetails = {
+      birthDetails: application.birthDetails,
+      deathDetails: application.deathDetails,
+      tradeDetails: application.tradeDetails,
+      nocDetails: application.nocDetails,
+    };
+
     res.status(201).json({
       success: true,
       message: 'Application submitted successfully',
@@ -80,15 +134,15 @@ const createApplication = async (req, res) => {
           department: application.department,
           status: application.status,
           createdAt: application.createdAt,
-          ...typeDetails, 
-        }
-      }
+          ...typeDetails,
+        },
+      },
     });
   } catch (error) {
     console.error('Create Application Error:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error during application submission.'
+      message: 'Server error during application submission.',
     });
   }
 };

@@ -2,6 +2,13 @@ const Application = require('../../models/Application');
 const User = require('../../models/User');
 const { APPLICATION_STATUS } = require('../../utils/constants');
 
+/**
+ * Forward an application from an officer to the department commissioner
+ * - Validates officer department
+ * - Finds commissioner
+ * - Adds DID, publicKey, and forwardedAt
+ * - Updates history for audit trail
+ */
 const assignApplication = async (req, res) => {
   try {
     const application = await Application.findOne({ applicationId: req.params.id });
@@ -13,7 +20,6 @@ const assignApplication = async (req, res) => {
       });
     }
 
-    // Officer who is updating (current logged-in user)
     const officer = req.user;
 
     // Map application types to departments
@@ -23,10 +29,8 @@ const assignApplication = async (req, res) => {
       TRADE_LICENSE: 'LICENSE',
       NOC: 'NOC'
     };
-
     const expectedDept = departmentMap[application.type];
 
-    // Validate officer’s department
     if (officer.department !== expectedDept) {
       return res.status(403).json({
         success: false,
@@ -34,7 +38,7 @@ const assignApplication = async (req, res) => {
       });
     }
 
-    // Find commissioner of same department
+    // Find commissioner of the department
     const commissioner = await User.findOne({
       department: officer.department,
       role: 'COMMISSIONER'
@@ -47,12 +51,41 @@ const assignApplication = async (req, res) => {
       });
     }
 
-    // Update and forward application
+    if (!commissioner.did || !commissioner.publicKey) {
+      return res.status(400).json({
+        success: false,
+        message: 'Commissioner is not provisioned with DID/publicKey. Contact admin.'
+      });
+    }
+
+    // Forward application
     application.assignedOfficer = officer._id;
     application.forwardedCommissioner = commissioner._id;
+    application.forwardedCommissionerDID = commissioner.did;
+    application.forwardedCommissionerPublicKey = commissioner.publicKey;
     application.department = officer.department;
     application.status = APPLICATION_STATUS.FORWARDED_TO_COMMISSIONER;
+    application.forwardedAt = new Date();
     application.updatedAt = new Date();
+
+    // Maintain audit/history
+    if (!Array.isArray(application.history)) application.history = [];
+    application.history.push({
+      action: 'FORWARDED_TO_COMMISSIONER',
+      by: {
+        id: officer._id,
+        name: officer.name,
+        did: officer.did || null,
+        role: officer.role
+      },
+      to: {
+        id: commissioner._id,
+        name: commissioner.name,
+        did: commissioner.did
+      },
+      at: application.forwardedAt,
+      note: `Forwarded ${application.type} application to ${officer.department} commissioner`
+    });
 
     await application.save();
 
@@ -61,8 +94,18 @@ const assignApplication = async (req, res) => {
       message: `Application forwarded to ${officer.department} commissioner successfully.`,
       data: {
         application,
-        officer: officer.name,
-        forwardedTo: commissioner.name,
+        officer: {
+          id: officer._id,
+          name: officer.name,
+          department: officer.department,
+          did: officer.did || null
+        },
+        forwardedTo: {
+          id: commissioner._id,
+          name: commissioner.name,
+          did: commissioner.did,
+          publicKey: commissioner.publicKey
+        },
         department: officer.department
       }
     });

@@ -11,19 +11,19 @@ async function main() {
   // Get contract factory
   const CredentialRegistry = await ethers.getContractFactory("CredentialRegistry");
 
-  // Deploy contract
-  const registry = await CredentialRegistry.deploy();
+  // ✅ Deploy contract with deployer as admin
+  const registry = await CredentialRegistry.deploy(await deployer.getAddress());
   await registry.waitForDeployment(); // ethers v6
 
   console.log("✅ CredentialRegistry deployed to:", registry.target);
 
-  // Add additional issuers
+  // Add additional issuers (accounts #1, #2, #3)
   for (const issuer of additionalIssuers) {
     await registry.addIssuer(await issuer.getAddress());
     console.log("📝 Authorized issuer added:", await issuer.getAddress());
   }
 
-  // Show all authorized issuers
+  // Show all authorized issuers (deployer + first 3 additional issuers)
   const allIssuers = [deployer, ...additionalIssuers];
   console.log("🎯 All authorized issuers:");
   for (const issuer of allIssuers) {

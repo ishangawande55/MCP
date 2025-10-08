@@ -1,59 +1,53 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
+const { generateDID } = require('../utils/didGenerator'); // new utility
 
 const userSchema = new mongoose.Schema(
   {
-    name: {
+    did: {
       type: String,
-      required: true
+      unique: true,
+      default: function () {
+        // Auto-generate DID for all users (applicants/officers/commissioners)
+        return generateDID(this.role);
+      }
     },
-    email: {
-      type: String,
-      required: true,
-      unique: true
-    },
+    publicKey: { type: String }, // optional, filled if DID has key
+
+    name: { type: String, required: true },
+    email: { type: String, required: true, unique: true },
     password: {
       type: String,
-      required: true
+      required: function () { return this.role !== 'APPLICANT'; } // password optional for applicants
     },
     role: {
       type: String,
-      enum: ['OFFICER', 'ADMIN', 'COMMISSIONER'], // Added COMMISSIONER role
-      default: 'OFFICER'
+      enum: ['APPLICANT', 'OFFICER', 'COMMISSIONER', 'ADMIN'],
+      default: 'APPLICANT'
     },
     department: {
       type: String,
-      enum: ['HEALTHCARE', 'LICENSE', 'NOC'], // Only valid departments
-      required: function () {
-        // Department required for OFFICER, optional for ADMIN
-        return this.role === 'OFFICER' || this.role === 'COMMISSIONER';
-      }
+      enum: ['HEALTHCARE', 'LICENSE', 'NOC'],
+      required: function () { return this.role === 'OFFICER' || this.role === 'COMMISSIONER'; }
     },
-    blockchainAddress: {
-      type: String,
-      required: false
-    },
-    isActive: {
-      type: Boolean,
-      default: true
-    },
-    createdAt: {
-      type: Date,
-      default: Date.now
-    }
+    phone: { type: String, required: function () { return this.role === 'APPLICANT'; } },
+    address: { type: String, required: function () { return this.role === 'APPLICANT'; } },
+    blockchainAddress: { type: String },
+    isActive: { type: Boolean, default: true },
+    createdAt: { type: Date, default: Date.now }
   },
   { timestamps: true }
 );
 
-// Hash password before saving
+// Hash password
 userSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();
-  this.password = await bcrypt.hash(this.password, 12);
+  if (this.password) this.password = await bcrypt.hash(this.password, 12);
   next();
 });
 
-// Compare password method
 userSchema.methods.comparePassword = async function (candidatePassword) {
+  if (!this.password) return false;
   return await bcrypt.compare(candidatePassword, this.password);
 };
 

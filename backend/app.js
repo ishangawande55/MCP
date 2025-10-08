@@ -9,6 +9,8 @@ const authRoutes = require('./routes/auth');
 const applicationRoutes = require('./routes/applications');
 const credentialRoutes = require('./routes/credentials');
 
+const { initVault } = require('./services/vaultService');
+
 // Initialize express
 const app = express();
 
@@ -45,5 +47,16 @@ app.use((error, req, res, next) => {
     error: process.env.NODE_ENV === 'development' ? error.message : undefined
   });
 });
+
+
+(async () => {
+  try {
+    await initVault();
+    console.log('Vault ready');
+  } catch (err) {
+    console.error('Vault initialization failed:', err);
+    process.exit(1);
+  }
+})();
 
 module.exports = app;

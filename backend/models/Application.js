@@ -4,6 +4,8 @@ const applicationSchema = new mongoose.Schema(
   {
     applicationId: { type: String, required: true, unique: true },
 
+    credentialId: { type: String, ref: "Credential" },
+
     type: {
       type: String,
       enum: ["BIRTH", "DEATH", "TRADE_LICENSE", "NOC"],
@@ -17,10 +19,12 @@ const applicationSchema = new mongoose.Schema(
     },
 
     applicant: {
+      userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: false },
       name: { type: String, required: true },
       email: { type: String, required: true },
       phone: { type: String, required: true },
       address: { type: String, required: true },
+      did: { type: String, required: true }
     },
 
     birthDetails: {
@@ -71,6 +75,32 @@ const applicationSchema = new mongoose.Schema(
     forwardedCommissioner: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
 
     reviewComments: String,
+
+    forwardedCommissionerDID: { type: String },
+    forwardedCommissionerPublicKey: { type: String }, // added for issuance
+    forwardedAt: { type: Date },
+
+    issuedAt: { type: Date },
+    credential: { type: mongoose.Schema.Types.ObjectId, ref: "Credential" },
+
+    history: [
+      {
+        action: String,
+        by: {
+          id: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+          name: String,
+          role: String,
+          did: String,
+        },
+        to: {
+          id: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+          name: String,
+          did: String,
+        },
+        at: { type: Date, default: Date.now },
+        note: String,
+      },
+    ],
   },
   { timestamps: true }
 );

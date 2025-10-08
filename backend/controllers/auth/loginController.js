@@ -12,35 +12,47 @@ exports.loginUser = async (req, res) => {
       });
     }
 
+    // Find active user
     const user = await User.findOne({ email, isActive: true });
     if (!user) {
       return res.status(401).json({ success: false, message: 'Invalid credentials.' });
     }
 
+    // Validate password
     const isPasswordValid = await user.comparePassword(password);
     if (!isPasswordValid) {
       return res.status(401).json({ success: false, message: 'Invalid credentials.' });
     }
 
-    const token = jwt.sign(
-      { id: user._id, email: user.email, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN }
-    );
+    // Create JWT payload
+    const payload = {
+      id: user._id,
+      email: user.email,
+      role: user.role,
+    };
+
+    // Optionally include DID for officers/commissioners
+    if (user.did) payload.did = user.did;
+
+    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN });
+
+    // Response data
+    const responseData = {
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      department: user.department || null,
+      blockchainAddress: user.blockchainAddress || null,
+      did: user.did || null,
+    };
 
     res.json({
       success: true,
       message: 'Login successful',
       data: {
         token,
-        user: {
-          id: user._id,
-          name: user.name,
-          email: user.email,
-          role: user.role,
-          department: user.department,
-          blockchainAddress: user.blockchainAddress
-        }
+        user: responseData
       }
     });
 

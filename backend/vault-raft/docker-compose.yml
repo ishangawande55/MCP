@@ -1,0 +1,35 @@
+services:
+  vault01:
+    image: hashicorp/vault:1.14.0
+    container_name: vault01
+    restart: always
+    ports:
+      - "8200:8200"
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - ./config/vault01:/vault/config
+      - ./data/vault01:/vault/data
+    command: vault server -config=/vault/config/vault.hcl
+
+  vault02:
+    image: hashicorp/vault:1.14.0
+    container_name: vault02
+    restart: always
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - ./config/vault02:/vault/config
+      - ./data/vault02:/vault/data
+    command: vault server -config=/vault/config/vault.hcl
+
+  vault03:
+    image: hashicorp/vault:1.14.0
+    container_name: vault03
+    restart: always
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - ./config/vault03:/vault/config
+      - ./data/vault03:/vault/data
+    command: vault server -config=/vault/config/vault.hcl

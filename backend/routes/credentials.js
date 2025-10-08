@@ -3,10 +3,6 @@ const auth = require("../middleware/auth");
 const { requireOfficer } = require("../middleware/roleCheck");
 
 const {
-  issueCredential,
-} = require("../controllers/credentials/issueCredentialController");
-
-const {
   downloadCredential,
 } = require("../controllers/credentials/downloadCredentialController");
 
@@ -28,8 +24,6 @@ const {
 
 const router = express.Router();
 
-// Routes
-router.post("/issue/:applicationId", auth, requireOfficer, issueCredential);
 router.get("/download/:credentialId", downloadCredential);
 router.post("/verify", verifyCredential);
 router.get("/qr/:credentialId", getCredentialByQR);

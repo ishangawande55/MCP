@@ -1,6 +1,6 @@
 const express = require("express");
 const auth = require("../middleware/auth");
-const { requireOfficer } = require("../middleware/roleCheck");
+const { requireRole, requireOfficer } = require("../middleware/roleCheck");
 
 const router = express.Router();
 
@@ -11,24 +11,62 @@ const { assignApplication } = require("../controllers/application/assignApplicat
 const { getDashboardStats } = require("../controllers/application/dashboardStatsController");
 const { processApplication } = require('../controllers/application/commissionerApplicationController');
 
-// Officer/Commissioner: Dashboard statistics
-router.get("/stats/dashboard", auth, requireOfficer, getDashboardStats);
+// =========================
+// Routes
+// =========================
 
-// Citizen: Create new application
-router.post("/", createApplication);
+// -------------------------
+// Dashboard statistics (OFFICER or COMMISSIONER)
+router.get(
+  "/stats/dashboard",
+  auth,
+  requireRole('OFFICER', 'COMMISSIONER'),
+  getDashboardStats
+);
 
+// -------------------------
+// Citizen: Create new application (APPLICANT only)
+router.post(
+  "/",
+  auth,
+  requireRole('APPLICANT'),
+  createApplication
+);
+
+// -------------------------
 // Officer: Get all applications
-router.get("/", auth, requireOfficer, getAllApplications);
+router.get(
+  "/",
+  auth,
+  requireOfficer, // OFFICER / ADMIN / COMMISSIONER
+  getAllApplications
+);
 
+// -------------------------
 // Officer: Get single application
-router.get("/:id", auth, requireOfficer, getApplicationById);
+router.get(
+  "/:id",
+  auth,
+  requireOfficer,
+  getApplicationById
+);
 
-// Officer: Assign application
-router.put("/:id/assign", auth, requireOfficer, assignApplication);
+// -------------------------
+// Officer: Assign application to commissioner
+router.put(
+  "/:id/assign",
+  auth,
+  requireOfficer,
+  assignApplication
+);
 
-// Commissioner approves/rejects an application
-router.put('/:id/process', auth,requireOfficer, processApplication);
-
-
+// -------------------------
+// Commissioner: Approve/Reject application
+router.put(
+  "/:id/process",
+  auth,
+  requireRole('COMMISSIONER'),
+  processApplication
+);
 
 module.exports = router;
