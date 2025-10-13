@@ -1,40 +1,68 @@
-const { signData } = require('../services/vaultService');
-const { SignJWT } = require('jose');
+/**
+ * @file vaultSigner.js
+ * @description
+ * Handles signing of Verifiable Credentials (VCs) using commissioner Vault keys.
+ * Supports optional ZKP commitments for selective disclosure.
+ */
+
+const Commissioner = require('../models/User');
+const { signDataWithZKP } = require('../services/vaultService');
 
 /**
- * Sign VC payload using Vault Transit engine
- * @param {object} vcPayload - Verifiable Credential payload
- * @param {string} keyName - Vault Transit key name
- * @returns {string} VC JWT signed via Vault
+ * Simple Vault VC signer for controller
+ * @param {object} vcPayload - VC payload
+ * @param {string} vaultKeyName - Vault key name
+ * @param {string} vaultToken - Vault token (optional, defaults to commissioner token)
+ * @returns {Promise<string>} signed VC (Base64/JWT)
  */
-async function signVCWithVault(vcPayload, keyName = 'commissioner-key-u123') {
-  // 1️⃣ Convert payload to JSON string
-  const payloadStr = JSON.stringify(vcPayload);
+async function signVCWithVault(vcPayload, vaultKeyName, vaultToken) {
+  if (!vcPayload || !vaultKeyName) {
+    throw new Error('Missing VC payload or Vault key name');
+  }
 
-  // 2️⃣ Sign with Vault
-  const vaultSignature = await signData(keyName, payloadStr);
+  if (!vaultToken) {
+    throw new Error('Vault token not provided. Use commissioner.vault.token');
+  }
 
-  // 3️⃣ Convert Vault signature to DER/base64url format
-  // Vault returns ecdsa-p256-sha256 signature like: vault:v1:BASE64
-  const parts = vaultSignature.split(':');
-  const sigBase64 = parts[2];
+  // Use vaultService to sign
+  const result = await signDataWithZKP(vaultToken, vaultKeyName, vcPayload);
 
-  // 4️⃣ Build JWT manually using jose (header + payload + signature)
-  const header = {
-    alg: 'ES256',
-    typ: 'JWT',
-    kid: keyName
-  };
-
-  const base64urlEncode = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url');
-
-  const encodedHeader = base64urlEncode(header);
-  const encodedPayload = Buffer.from(payloadStr).toString('base64url');
-
-  // Combine header.payload.signature
-  const jwt = `${encodedHeader}.${encodedPayload}.${sigBase64.replace(/=/g, '')}`;
-
-  return jwt;
+  // Return signed VC string for controller
+  return result.signature;
 }
 
-module.exports = { signVCWithVault };
+/**
+ * Advanced ZKP-enabled VC signing
+ * @param {object} vcPayload
+ * @param {string} commissionerId - MongoDB _id of commissioner
+ * @param {object} zkCommitments - optional
+ * @param {object} zkpProofs - optional
+ * @param {string} blindingFactorRef - optional
+ * @returns {Promise<object>} signed VC + metadata
+ */
+async function signVCWithVaultZKP(vcPayload, commissionerId, zkCommitments = {}, zkpProofs = {}, blindingFactorRef = null) {
+  const commissioner = await Commissioner.findById(commissionerId);
+  if (!commissioner || !commissioner.vault) {
+    throw new Error(`Vault credentials not found for commissioner ${commissionerId}`);
+  }
+
+  const { keyName, token } = commissioner.vault;
+
+  const payloadWithZKP = {
+    ...vcPayload,
+    zkCommitments,
+    zkpProofs,
+    blindingFactorRef
+  };
+
+  const result = await signDataWithZKP(token, keyName, payloadWithZKP);
+
+  return {
+    signedVC: result.signature,
+    vcPayload: payloadWithZKP,
+    zkpProofs: result.zkpProof,
+    blindingFactorRef
+  };
+}
+
+module.exports = { signVCWithVault, signVCWithVaultZKP };

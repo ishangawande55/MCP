@@ -24,9 +24,9 @@ contract CredentialRegistry is AccessControl, Pausable, ReentrancyGuard {
     struct Credential {
         bytes32 credentialHash;   // SHA-256 hash of canonical credential bytes
         string ipfsCID;           // IPFS CID (or other content-address)
-        address issuerAddress;    // on-chain account who issued (municipal officer)
-        string issuerDID;         // issuer DID (e.g., did:mcp:comm001)
-        string holderDID;         // holder DID (e.g., did:mcp:ishan123)
+        address issuerAddress;    // on-chain account who issued (municipal commissioner)
+        string issuerDID;         // issuer DID 
+        string holderDID;         // holder DID 
         uint256 timestamp;        // issuance block timestamp
         uint256 expiry;           // expiry timestamp, 0 = never expires
         bool revoked;             // revocation flag

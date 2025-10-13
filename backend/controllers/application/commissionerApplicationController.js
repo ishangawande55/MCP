@@ -1,37 +1,42 @@
+/**
+ * Controller: processApplication
+ * 
+ * Description:
+ * Handles the review and approval/rejection of applications by commissioners.
+ * 
+ * APPROVAL FLOW:
+ *  1. Build Verifiable Credential (VC) payload
+ *  2. Dynamically fetch the commissioner’s Vault key name from their user record
+ *  3. Sign the VC payload using HashiCorp Vault Transit Engine (private key never leaves Vault)
+ *  4. Upload signed VC JWT to IPFS
+ *  5. Generate SHA-256 hash of VC JWT for immutability
+ *  6. Issue credential on blockchain (anchored record)
+ *  7. Save credential metadata in MongoDB
+ *  8. Update application history and status
+ * 
+ * REJECTION FLOW:
+ *  1. Update application status and log action in history
+ * 
+ * Security Notes:
+ * - Each commissioner has their own Vault-managed signing key.
+ * - Vault keys are dynamically created during registration.
+ * - No private key or sensitive token is ever exposed or stored locally.
+ */
+
 const Application = require('../../models/Application');
 const Credential = require('../../models/Credential');
 const { APPLICATION_STATUS } = require('../../utils/constants');
 const ipfsService = require('../../services/ipfsService');
 const blockchainService = require('../../services/blockchainService');
 const crypto = require('crypto');
-
 const { signVCWithVault } = require('../../utils/vaultSigner');
 
-/**
- * Controller: Commissioner processes an application
- * Handles APPROVE or REJECT actions
- *
- * Flow for APPROVE:
- * 1. Build VC payload
- * 2. Sign VC using Vault Transit engine (private key never leaves Vault)
- * 3. Upload VC JWT to IPFS
- * 4. Compute SHA256 hash of VC JWT
- * 5. Issue credential on blockchain
- * 6. Save credential in MongoDB
- * 7. Update application history
- *
- * Flow for REJECT:
- * 1. Update application status and history
- *
- * @route POST /api/applications/:id/process
- * @body { action: 'APPROVE' | 'REJECT', reviewComments?: string }
- */
 const processApplication = async (req, res) => {
   try {
     const { action, reviewComments } = req.body;
     const applicationId = req.params.id;
 
-    // Fetch the application
+    // Fetch application record
     const application = await Application.findOne({ applicationId });
     if (!application) {
       return res.status(404).json({ success: false, message: 'Application not found.' });
@@ -39,30 +44,35 @@ const processApplication = async (req, res) => {
 
     const commissioner = req.user;
 
-    // Only commissioners can process applications
+    // Verify that user is authorized to process applications
     if (commissioner.role !== 'COMMISSIONER') {
-      return res.status(403).json({ success: false, message: 'Only commissioners can process applications.' });
+      return res.status(403).json({ success: false, message: 'Access denied: Only commissioners can process applications.' });
     }
 
-    // Ensure the application is forwarded to this commissioner
+    // Verify that the application has been forwarded to the current commissioner
     if (application.forwardedCommissioner?.toString() !== commissioner._id.toString()) {
-      return res.status(403).json({ success: false, message: 'Application not assigned to you.' });
+      return res.status(403).json({ success: false, message: 'This application is not assigned to you.' });
     }
 
-    // Ensure correct application status
+    // Ensure application is in the correct state before processing
     if (application.status !== APPLICATION_STATUS.FORWARDED_TO_COMMISSIONER) {
       return res.status(400).json({ success: false, message: 'Application not ready for commissioner action.' });
     }
 
-    /** --------------------
-     * Handle REJECTION
-     * -------------------- */
+    /**
+     * ---------------------------------
+     * Handle REJECTION ACTION
+     * ---------------------------------
+     */
     if (action === 'REJECT') {
       application.status = APPLICATION_STATUS.REJECTED;
       application.reviewComments = reviewComments || '';
       application.updatedAt = new Date();
 
+      // Ensure application history array exists
       if (!Array.isArray(application.history)) application.history = [];
+
+      // Log rejection in history
       application.history.push({
         action: 'REJECTED',
         by: { id: commissioner._id, name: commissioner.name, did: commissioner.did },
@@ -74,17 +84,18 @@ const processApplication = async (req, res) => {
       return res.json({ success: true, message: 'Application rejected successfully.', data: application });
     }
 
-    /** --------------------
-     * Handle APPROVAL
-     * -------------------- */
+    /**
+     * ---------------------------------
+     * Handle APPROVAL ACTION
+     * ---------------------------------
+     */
     if (action === 'APPROVE') {
-
-      // Ensure applicant DID exists
+      // Ensure applicant DID is available
       if (!application.applicant?.did) {
         return res.status(400).json({ success: false, message: 'Applicant DID is missing. Cannot issue credential.' });
       }
 
-      // Prevent duplicate issuance
+      // Prevent re-issuance of credentials
       const existingCredential = await Credential.findOne({ applicationId });
       if (existingCredential) {
         return res.status(400).json({
@@ -94,9 +105,11 @@ const processApplication = async (req, res) => {
         });
       }
 
-      /** --------------------
-       * Build VC payload
-       * -------------------- */
+      /**
+       * ---------------------------------
+       * Build Verifiable Credential (VC)
+       * ---------------------------------
+       */
       const vcPayload = {
         "@context": ["https://www.w3.org/2018/credentials/v1"],
         id: `vc-${application.applicationId}`,
@@ -122,30 +135,57 @@ const processApplication = async (req, res) => {
         }
       };
 
-      /** --------------------
-       * Sign VC using Vault
-       * -------------------- */
-     const vcJwt = await signVCWithVault(vcPayload, 'commissioner-key-u123');
+      /**
+       * ---------------------------------
+       * Determine Commissioner’s Vault Key
+       * ---------------------------------
+       * The commissioner record in MongoDB contains a reference
+       * to their assigned Vault key (e.g., "commissioner-key-u123").
+       * This ensures each commissioner signs with their own key.
+       */
+      const vaultKeyName = commissioner.vault?.keyName;
+      const vaultToken = commissioner.vault?.token;
 
-      /** --------------------
-       * Upload VC JWT to IPFS
-       * -------------------- */
+      if (!vaultKeyName || !vaultToken) {
+        return res.status(400).json({ success: false, message: 'Vault key or token not configured for this commissioner.' });
+      }
+
+      /**
+       * ---------------------------------
+       * Sign the VC Payload using Vault
+       * ---------------------------------
+       * Vault’s Transit Engine signs the payload securely.
+       * The private key remains inside Vault.
+       */
+      const vcJwt = await signVCWithVault(vcPayload, vaultKeyName, vaultToken);
+
+      /**
+       * ---------------------------------
+       * Upload Signed VC to IPFS
+       * ---------------------------------
+       */
       const ipfsResult = await ipfsService.uploadJSON({ vcJwt });
       const ipfsCID = typeof ipfsResult === 'string' ? ipfsResult : ipfsResult.cid;
 
-      /** --------------------
-       * Compute SHA256 hash for blockchain
-       * -------------------- */
+      /**
+       * ---------------------------------
+       * Generate Hash for Blockchain Record
+       * ---------------------------------
+       */
       const vcHash = crypto.createHash('sha256').update(vcJwt).digest('hex');
 
-      /** --------------------
-       * Generate unique credential ID
-       * -------------------- */
+      /**
+       * ---------------------------------
+       * Generate Unique Credential ID
+       * ---------------------------------
+       */
       const credentialId = `cred-${application.applicationId}-${Date.now()}`;
 
-      /** --------------------
-       * Issue credential on blockchain
-       * -------------------- */
+      /**
+       * ---------------------------------
+       * Issue Credential on Blockchain
+       * ---------------------------------
+       */
       const departmentRoleMap = {
         'HEALTHCARE': 'HEALTHCARE_COMMISSIONER',
         'LICENSE': 'LICENSE_COMMISSIONER',
@@ -164,9 +204,11 @@ const processApplication = async (req, res) => {
         `${application.type}_Credential`
       );
 
-      /** --------------------
-       * Save credential in MongoDB
-       * -------------------- */
+      /**
+       * ---------------------------------
+       * Store Credential Metadata in MongoDB
+       * ---------------------------------
+       */
       const newCredential = new Credential({
         applicationId,
         credentialId,
@@ -186,9 +228,11 @@ const processApplication = async (req, res) => {
       });
       await newCredential.save();
 
-      /** --------------------
-       * Update application
-       * -------------------- */
+      /**
+       * ---------------------------------
+       * Update Application Record
+       * ---------------------------------
+       */
       application.status = APPLICATION_STATUS.APPROVED;
       application.reviewComments = reviewComments || '';
       application.credential = newCredential._id;
@@ -200,11 +244,16 @@ const processApplication = async (req, res) => {
         action: 'APPROVED_AND_ISSUED',
         by: { id: commissioner._id, name: commissioner.name, did: commissioner.did },
         at: application.issuedAt,
-        note: 'VC issued via Vault, uploaded to IPFS, anchored on blockchain'
+        note: 'VC issued via Vault, uploaded to IPFS, and anchored on blockchain.'
       });
 
       await application.save();
 
+      /**
+       * ---------------------------------
+       * Send Success Response
+       * ---------------------------------
+       */
       return res.json({
         success: true,
         message: 'Application approved and credential issued successfully.',
@@ -225,6 +274,7 @@ const processApplication = async (req, res) => {
       });
     }
 
+    // Handle invalid actions
     return res.status(400).json({ success: false, message: 'Invalid action. Use APPROVE or REJECT.' });
 
   } catch (error) {
