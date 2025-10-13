@@ -1,26 +1,19 @@
 /**
- * Controller: processApplication
- * 
- * Description:
- * Handles the review and approval/rejection of applications by commissioners.
- * 
- * APPROVAL FLOW:
- *  1. Build Verifiable Credential (VC) payload
- *  2. Dynamically fetch the commissioner’s Vault key name from their user record
- *  3. Sign the VC payload using HashiCorp Vault Transit Engine (private key never leaves Vault)
- *  4. Upload signed VC JWT to IPFS
- *  5. Generate SHA-256 hash of VC JWT for immutability
- *  6. Issue credential on blockchain (anchored record)
- *  7. Save credential metadata in MongoDB
- *  8. Update application history and status
- * 
- * REJECTION FLOW:
- *  1. Update application status and log action in history
- * 
- * Security Notes:
- * - Each commissioner has their own Vault-managed signing key.
- * - Vault keys are dynamically created during registration.
- * - No private key or sensitive token is ever exposed or stored locally.
+ * @file processApplication.js
+ * @author Ishan Gawande
+ * @description
+ * Controller to handle approval/rejection of municipal applications with:
+ *  - Zero-Knowledge Proofs (ZKPs) for selective disclosure
+ *  - Vault-signed Verifiable Credentials (VC)
+ *  - IPFS storage of VC JWT
+ *  - Blockchain anchoring of deterministic VC payload hash and Merkle root
+ *
+ * Key Features:
+ *  - Generates canonical VC payload for deterministic hashing
+ *  - Normalizes issuanceDate for consistent hashing
+ *  - Stores selective disclosure fields only
+ *  - Integrates ZKP proof generation and Merkle root anchoring
+ *  - Maintains full audit trail of approval/rejection actions
  */
 
 const Application = require('../../models/Application');
@@ -30,13 +23,72 @@ const ipfsService = require('../../services/ipfsService');
 const blockchainService = require('../../services/blockchainService');
 const crypto = require('crypto');
 const { signVCWithVault } = require('../../utils/vaultSigner');
+const ZKPService = require('../../services/ZKPService');
 
+const SUPPORTED_TYPES = ['BIRTH', 'DEATH', 'TRADE_LICENSE', 'NOC'];
+
+/**
+ * Deterministically canonicalize an object for hashing
+ * @param {Object} obj 
+ * @returns {string} Canonicalized JSON string
+ */
+const canonicalize = (obj) => {
+  if (!obj || typeof obj !== 'object') return JSON.stringify(obj);
+  const sortedKeys = Object.keys(obj).sort();
+  const result = {};
+  for (const key of sortedKeys) {
+    result[key] = typeof obj[key] === 'object' && obj[key] !== null
+      ? JSON.parse(canonicalize(obj[key]))
+      : obj[key];
+  }
+  return JSON.stringify(result);
+};
+
+/**
+ * Converts a string or hash to 0x-prefixed bytes32 format for Solidity
+ * @param {string} input 
+ * @returns {string} 0x-prefixed 32-byte hex
+ */
+const toBytes32 = (input) => {
+  if (!input) throw new Error('Cannot convert empty value to bytes32');
+  let hex;
+  if (/^0x[0-9a-fA-F]+$/.test(input)) {
+    hex = input.slice(2);
+  } else {
+    hex = crypto.createHash('sha256').update(input.toString()).digest('hex');
+  }
+  hex = hex.padStart(64, '0').slice(0, 64);
+  return '0x' + hex;
+};
+
+/**
+ * Filter an object to include only fields allowed for selective disclosure
+ * @param {Object} details 
+ * @param {Array} disclosedFields 
+ * @returns {Object} Filtered object
+ */
+const filterDisclosedFields = (details, disclosedFields) => {
+  if (!details || !disclosedFields) return {};
+  return Object.keys(details)
+    .filter((key) => disclosedFields.includes(key))
+    .reduce((obj, key) => {
+      obj[key] = details[key];
+      return obj;
+    }, {});
+};
+
+/**
+ * Controller: Process application (APPROVE / REJECT)
+ * @route POST /api/applications/:id/process
+ */
 const processApplication = async (req, res) => {
   try {
     const { action, reviewComments } = req.body;
     const applicationId = req.params.id;
 
-    // Fetch application record
+    // --------------------------
+    // Fetch application
+    // --------------------------
     const application = await Application.findOne({ applicationId });
     if (!application) {
       return res.status(404).json({ success: false, message: 'Application not found.' });
@@ -44,35 +96,27 @@ const processApplication = async (req, res) => {
 
     const commissioner = req.user;
 
-    // Verify that user is authorized to process applications
+    // --------------------------
+    // Authorization
+    // --------------------------
     if (commissioner.role !== 'COMMISSIONER') {
-      return res.status(403).json({ success: false, message: 'Access denied: Only commissioners can process applications.' });
+      return res.status(403).json({ success: false, message: 'Only commissioners can process applications.' });
     }
-
-    // Verify that the application has been forwarded to the current commissioner
     if (application.forwardedCommissioner?.toString() !== commissioner._id.toString()) {
-      return res.status(403).json({ success: false, message: 'This application is not assigned to you.' });
+      return res.status(403).json({ success: false, message: 'Application not assigned to you.' });
     }
-
-    // Ensure application is in the correct state before processing
     if (application.status !== APPLICATION_STATUS.FORWARDED_TO_COMMISSIONER) {
-      return res.status(400).json({ success: false, message: 'Application not ready for commissioner action.' });
+      return res.status(400).json({ success: false, message: 'Application not ready for processing.' });
     }
 
-    /**
-     * ---------------------------------
-     * Handle REJECTION ACTION
-     * ---------------------------------
-     */
+    // --------------------------
+    // Handle REJECTION
+    // --------------------------
     if (action === 'REJECT') {
       application.status = APPLICATION_STATUS.REJECTED;
-      application.reviewComments = reviewComments || '';
+      application.reviewComments = reviewComments || 'Rejected by commissioner';
       application.updatedAt = new Date();
-
-      // Ensure application history array exists
-      if (!Array.isArray(application.history)) application.history = [];
-
-      // Log rejection in history
+      application.history = application.history || [];
       application.history.push({
         action: 'REJECTED',
         by: { id: commissioner._id, name: commissioner.name, did: commissioner.did },
@@ -84,18 +128,15 @@ const processApplication = async (req, res) => {
       return res.json({ success: true, message: 'Application rejected successfully.', data: application });
     }
 
-    /**
-     * ---------------------------------
-     * Handle APPROVAL ACTION
-     * ---------------------------------
-     */
+    // --------------------------
+    // Handle APPROVAL
+    // --------------------------
     if (action === 'APPROVE') {
-      // Ensure applicant DID is available
-      if (!application.applicant?.did) {
-        return res.status(400).json({ success: false, message: 'Applicant DID is missing. Cannot issue credential.' });
+      if (!SUPPORTED_TYPES.includes(application.type)) {
+        return res.status(400).json({ success: false, message: `Unsupported application type for ZKP: ${application.type}` });
       }
 
-      // Prevent re-issuance of credentials
+      // Prevent duplicate issuance
       const existingCredential = await Credential.findOne({ applicationId });
       if (existingCredential) {
         return res.status(400).json({
@@ -105,118 +146,113 @@ const processApplication = async (req, res) => {
         });
       }
 
-      /**
-       * ---------------------------------
-       * Build Verifiable Credential (VC)
-       * ---------------------------------
-       */
+      // --------------------------
+      // Flatten type-specific details for ZKP input
+      // --------------------------
+      let typeDetails;
+      switch (application.type) {
+        case 'BIRTH': typeDetails = application.birthDetails || {}; break;
+        case 'DEATH': typeDetails = application.deathDetails || {}; break;
+        case 'TRADE_LICENSE': typeDetails = application.tradeDetails || {}; break;
+        case 'NOC': typeDetails = application.nocDetails || {}; break;
+      }
+
+      const zkpInput = { ...application.toObject(), disclosedFields: application.disclosedFields || [] };
+      Object.assign(zkpInput, typeDetails);
+
+      // --------------------------
+      // Generate ZKP proof and Merkle root
+      // --------------------------
+      let zkpResult;
+      try {
+        zkpResult = await ZKPService.generateProofFromApplication(zkpInput);
+        application.zkpProof = zkpResult.proof;
+        application.publicSignals = zkpResult.publicSignals;
+        application.merkleRoot = zkpResult.merkleRoot;
+      } catch (zkError) {
+        console.error('ZKP Generation Error:', zkError);
+        return res.status(400).json({ success: false, message: 'ZKP generation failed', error: zkError.message });
+      }
+
+      // --------------------------
+      // Filter VC payload for selective disclosure
+      // --------------------------
+      const disclosedDetails = filterDisclosedFields(typeDetails, application.disclosedFields);
+
+      // Normalize issuanceDate to seconds to prevent hash mismatch
+      const issuanceDate = new Date().toISOString().split('.')[0] + 'Z';
+
       const vcPayload = {
         "@context": ["https://www.w3.org/2018/credentials/v1"],
         id: `vc-${application.applicationId}`,
         type: ["VerifiableCredential", `${application.type}_Credential`],
-        issuer: {
-          id: commissioner.did,
-          name: commissioner.name,
-          department: commissioner.department
-        },
-        issuanceDate: new Date().toISOString(),
+        issuer: { id: commissioner.did, name: commissioner.name, department: commissioner.department },
+        issuanceDate,
         credentialSubject: {
           id: application.applicant.did,
           applicant: application.applicant,
           applicationId: application.applicationId,
           type: application.type,
           department: application.department,
-          details: {
-            birth: application.birthDetails,
-            death: application.deathDetails,
-            trade: application.tradeDetails,
-            noc: application.nocDetails
-          }
+          details: disclosedDetails
         }
       };
 
-      /**
-       * ---------------------------------
-       * Determine Commissioner’s Vault Key
-       * ---------------------------------
-       * The commissioner record in MongoDB contains a reference
-       * to their assigned Vault key (e.g., "commissioner-key-u123").
-       * This ensures each commissioner signs with their own key.
-       */
+      // --------------------------
+      // Vault signing
+      // --------------------------
       const vaultKeyName = commissioner.vault?.keyName;
       const vaultToken = commissioner.vault?.token;
-
       if (!vaultKeyName || !vaultToken) {
-        return res.status(400).json({ success: false, message: 'Vault key or token not configured for this commissioner.' });
+        return res.status(400).json({ success: false, message: 'Vault key/token missing for commissioner.' });
       }
-
-      /**
-       * ---------------------------------
-       * Sign the VC Payload using Vault
-       * ---------------------------------
-       * Vault’s Transit Engine signs the payload securely.
-       * The private key remains inside Vault.
-       */
       const vcJwt = await signVCWithVault(vcPayload, vaultKeyName, vaultToken);
 
-      /**
-       * ---------------------------------
-       * Upload Signed VC to IPFS
-       * ---------------------------------
-       */
+      // --------------------------
+      // Upload VC JWT to IPFS
+      // --------------------------
       const ipfsResult = await ipfsService.uploadJSON({ vcJwt });
       const ipfsCID = typeof ipfsResult === 'string' ? ipfsResult : ipfsResult.cid;
 
-      /**
-       * ---------------------------------
-       * Generate Hash for Blockchain Record
-       * ---------------------------------
-       */
-      const vcHash = crypto.createHash('sha256').update(vcJwt).digest('hex');
+      // --------------------------
+      // Generate deterministic blockchain hash
+      // --------------------------
+      const canonicalPayload = canonicalize(vcPayload);
+      const payloadHashBytes32 = toBytes32(canonicalPayload);
+      const merkleRootBytes32 = toBytes32(application.merkleRoot);
 
-      /**
-       * ---------------------------------
-       * Generate Unique Credential ID
-       * ---------------------------------
-       */
+      // --------------------------
+      // Blockchain issuance
+      // --------------------------
       const credentialId = `cred-${application.applicationId}-${Date.now()}`;
-
-      /**
-       * ---------------------------------
-       * Issue Credential on Blockchain
-       * ---------------------------------
-       */
-      const departmentRoleMap = {
-        'HEALTHCARE': 'HEALTHCARE_COMMISSIONER',
-        'LICENSE': 'LICENSE_COMMISSIONER',
-        'NOC': 'NOC_COMMISSIONER'
-      };
+      const departmentRoleMap = { 'HEALTHCARE': 'HEALTHCARE_COMMISSIONER', 'LICENSE': 'LICENSES_COMMISSIONER', 'NOC': 'NOC_COMMISSIONER' };
       const role = departmentRoleMap[application.department] || 'ADMIN';
       blockchainService.setSigner(role);
 
       const tx = await blockchainService.issueCredential(
         credentialId,
-        vcHash,
+        payloadHashBytes32,
         ipfsCID,
+        merkleRootBytes32,
         commissioner.did,
         application.applicant.did,
         0,
         `${application.type}_Credential`
       );
 
-      /**
-       * ---------------------------------
-       * Store Credential Metadata in MongoDB
-       * ---------------------------------
-       */
+      // --------------------------
+      // Save credential in DB
+      // --------------------------
       const newCredential = new Credential({
         applicationId,
         credentialId,
         type: application.type,
-        vcData: { vcJwt },
+        vcData: { vcJwt, payload: vcPayload }, // Store canonical payload
+        canonicalPayload, // Store exact payload used for blockchain hash
         vcSignature: 'VAULT_SIGNED',
         ipfsCID,
-        credentialHash: vcHash,
+        credentialHash: payloadHashBytes32,
+        merkleRoot: application.merkleRoot,
         issuerDID: commissioner.did,
         holderDID: application.applicant.did,
         issuerAddress: commissioner.blockchainAddress,
@@ -228,32 +264,26 @@ const processApplication = async (req, res) => {
       });
       await newCredential.save();
 
-      /**
-       * ---------------------------------
-       * Update Application Record
-       * ---------------------------------
-       */
+      // --------------------------
+      // Update application
+      // --------------------------
       application.status = APPLICATION_STATUS.APPROVED;
       application.reviewComments = reviewComments || '';
       application.credential = newCredential._id;
       application.updatedAt = new Date();
       application.issuedAt = new Date();
-
-      if (!Array.isArray(application.history)) application.history = [];
+      application.history = application.history || [];
       application.history.push({
         action: 'APPROVED_AND_ISSUED',
         by: { id: commissioner._id, name: commissioner.name, did: commissioner.did },
         at: application.issuedAt,
-        note: 'VC issued via Vault, uploaded to IPFS, and anchored on blockchain.'
+        note: 'VC issued with selective disclosure, uploaded to IPFS, and anchored on blockchain with Merkle root.'
       });
-
       await application.save();
 
-      /**
-       * ---------------------------------
-       * Send Success Response
-       * ---------------------------------
-       */
+      // --------------------------
+      // Response
+      // --------------------------
       return res.json({
         success: true,
         message: 'Application approved and credential issued successfully.',
@@ -266,7 +296,8 @@ const processApplication = async (req, res) => {
           credential: {
             credentialId: newCredential.credentialId,
             schemaType: newCredential.schemaType,
-            issuedAt: newCredential.issuedAt
+            issuedAt: newCredential.issuedAt,
+            merkleRoot: newCredential.merkleRoot
           },
           ipfsCID,
           blockchainTx: newCredential.blockchainTxHash
@@ -274,12 +305,11 @@ const processApplication = async (req, res) => {
       });
     }
 
-    // Handle invalid actions
     return res.status(400).json({ success: false, message: 'Invalid action. Use APPROVE or REJECT.' });
 
   } catch (error) {
     console.error('Commissioner Process Application Error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Server error while processing application.',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined

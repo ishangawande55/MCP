@@ -1,16 +1,40 @@
+/**
+ * @file createApplicationController.js
+ * @author
+ * Ishan Rajeshwar Gawande
+ * @description
+ * Controller to handle creation of municipal applications (Birth, Death,
+ * Trade License, NOC) by registered applicants.
+ * Integrates Zero-Knowledge Proofs (ZKP) and Selective Disclosure (SD)
+ * for sensitive fields.
+ * Maintains application history, type-specific details, and persists data
+ * in MongoDB.
+ * -----------------------------------------------------------------------------
+ * Key Features:
+ *  - Authorization check for APPLICANT role
+ *  - Validation of application type
+ *  - Automatic department assignment
+ *  - Unique application ID generation
+ *  - ZKP proof generation using aligned circuit input order
+ *  - Application is NOT saved if ZKP generation fails
+ *  - Selective disclosure fields stored for later VC issuance
+ *  - Returns disclosed fields in response for applicant acknowledgment
+ */
+
 const Application = require('../../models/Application');
+const ZKPService = require('../../services/ZKPService');
 const { APPLICATION_STATUS, APPLICATION_TYPES } = require('../../utils/constants');
 
 /**
- * Create a new application submitted by a registered APPLICANT.
- * Only users with role 'APPLICANT' can create applications.
+ * Create a new municipal application submitted by an authenticated APPLICANT.
+ * Handles selective disclosure, type-specific details, and ZKP proof generation.
  */
 const createApplication = async (req, res) => {
   try {
     const user = req.user; // Auth middleware injects authenticated user
 
     // --------------------------
-    // 1️⃣ Authorization check
+    // Authorization check
     // --------------------------
     if (!user || user.role !== 'APPLICANT') {
       return res.status(403).json({
@@ -19,6 +43,9 @@ const createApplication = async (req, res) => {
       });
     }
 
+    // --------------------------
+    // Extract request data
+    // --------------------------
     const {
       type,
       birthDetails,
@@ -26,10 +53,11 @@ const createApplication = async (req, res) => {
       tradeDetails,
       nocDetails,
       supportingDocuments,
+      disclosedFields = [], // Fields applicant allows to disclose
     } = req.body;
 
     // --------------------------
-    // 2️⃣ Validate application type
+    // Validate application type
     // --------------------------
     if (!Object.values(APPLICATION_TYPES).includes(type)) {
       return res.status(400).json({
@@ -39,7 +67,7 @@ const createApplication = async (req, res) => {
     }
 
     // --------------------------
-    // 3️⃣ Determine department automatically
+    // Determine department automatically based on type
     // --------------------------
     const departmentMap = {
       BIRTH: 'HEALTHCARE',
@@ -50,14 +78,14 @@ const createApplication = async (req, res) => {
     const department = departmentMap[type];
 
     // --------------------------
-    // 4️⃣ Generate unique application ID
+    // Generate unique application ID
     // --------------------------
     const timestamp = Date.now();
     const random = Math.floor(Math.random() * 1000);
     const applicationId = `${type}-${timestamp}-${random}`;
 
     // --------------------------
-    // 5️⃣ Build base application object
+    // Build base application object
     // --------------------------
     const applicationData = {
       applicationId,
@@ -71,9 +99,10 @@ const createApplication = async (req, res) => {
         address: user.address || '',
         did: user.did || null,
       },
-      userId: user._id, // Reference to applicant
+      userId: user._id,
       status: APPLICATION_STATUS.PENDING,
       supportingDocuments: supportingDocuments || [],
+      disclosedFields, // Store applicant's disclosure choices in schema
       history: [
         {
           action: 'CREATED',
@@ -90,31 +119,49 @@ const createApplication = async (req, res) => {
     };
 
     // --------------------------
-    // 6️⃣ Add type-specific details
+    // Add type-specific details
     // --------------------------
     switch (type) {
       case 'BIRTH':
-        applicationData.birthDetails = birthDetails;
+        applicationData.birthDetails = birthDetails || {};
         break;
       case 'DEATH':
-        applicationData.deathDetails = deathDetails;
+        applicationData.deathDetails = deathDetails || {};
         break;
       case 'TRADE_LICENSE':
-        applicationData.tradeDetails = tradeDetails;
+        applicationData.tradeDetails = tradeDetails || {};
         break;
       case 'NOC':
-        applicationData.nocDetails = nocDetails;
+        applicationData.nocDetails = nocDetails || {};
         break;
     }
 
     // --------------------------
-    // 7️⃣ Save application to MongoDB
+    // Generate ZKP proof and Merkle root
+    // --------------------------
+    try {
+      const zkpResult = await ZKPService.generateProofFromApplication(applicationData);
+
+      applicationData.zkpProof = zkpResult.proof;
+      applicationData.publicSignals = zkpResult.publicSignals;
+      applicationData.merkleRoot = zkpResult.merkleRoot;
+    } catch (zkError) {
+      console.error('ZKP Generation Error:', zkError);
+      return res.status(400).json({
+        success: false,
+        message: 'Application creation failed: Zero-Knowledge Proof generation error.',
+        error: zkError.message,
+      });
+    }
+
+    // --------------------------
+    // Save application to MongoDB
     // --------------------------
     const application = new Application(applicationData);
     await application.save();
 
     // --------------------------
-    // 8️⃣ Prepare response (include only relevant type-specific details)
+    // Prepare response with type-specific details and disclosed fields
     // --------------------------
     const typeDetails = {
       birthDetails: application.birthDetails,
@@ -123,7 +170,7 @@ const createApplication = async (req, res) => {
       nocDetails: application.nocDetails,
     };
 
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
       message: 'Application submitted successfully',
       data: {
@@ -133,6 +180,8 @@ const createApplication = async (req, res) => {
           type: application.type,
           department: application.department,
           status: application.status,
+          merkleRoot: application.merkleRoot || null,
+          disclosedFields: application.disclosedFields, // Returned for applicant acknowledgment
           createdAt: application.createdAt,
           ...typeDetails,
         },
@@ -140,9 +189,10 @@ const createApplication = async (req, res) => {
     });
   } catch (error) {
     console.error('Create Application Error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Server error during application submission.',
+      error: error.message,
     });
   }
 };

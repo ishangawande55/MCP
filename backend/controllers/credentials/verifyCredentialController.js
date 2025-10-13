@@ -1,26 +1,91 @@
+/**
+ * @file verifyCredential.js
+ * @author Ishan
+ * @description
+ * Controller to verify issued Verifiable Credentials (VCs) with:
+ *  - Vault-signed JWT verification
+ *  - IPFS reference validation
+ *  - Blockchain anchoring and hash verification
+ *  - Zero-Knowledge Proof (ZKP) selective disclosure (Merkle root)
+ *
+ * Verification Flow:
+ * 1. Fetch credential from MongoDB
+ * 2. Check revocation and expiration
+ * 3. Normalize issuanceDate and canonicalize payload
+ * 4. Recalculate credential hash and compare with blockchain
+ * 5. Verify Vault JWT signature
+ * 6. Include ZKP Merkle root for selective disclosure verification
+ */
+
 const Credential = require('../../models/Credential');
 const blockchainService = require('../../services/blockchainService');
 const crypto = require('crypto');
-const { verifyCredentialJwt } = require('../../utils/didJwtVerifier'); // optional JWT verification helper
+const { verifyCredentialJwt } = require('../../utils/didJwtVerifier');
 
 /**
- * Helper: Deterministically canonicalize an object for consistent hashing
- * @param {Object} obj - The object to canonicalize
- * @returns {string} - Canonicalized JSON string
+ * Deterministically canonicalize an object for hashing
+ * Handles nested objects, arrays, and safely serializes BigInts
+ * @param {Object} obj 
+ * @returns {string} Canonicalized JSON string
  */
-function canonicalize(obj) {
-  return JSON.stringify(obj, Object.keys(obj).sort());
-}
+const canonicalize = (obj) => {
+  if (!obj || typeof obj !== 'object') return JSON.stringify(obj);
+
+  if (Array.isArray(obj)) {
+    return JSON.stringify(obj.map(canonicalize));
+  }
+
+  const sortedKeys = Object.keys(obj).sort();
+  const result = {};
+  for (const key of sortedKeys) {
+    let value = obj[key];
+    if (typeof value === 'bigint') {
+      value = value.toString();
+    } else if (value && typeof value === 'object') {
+      value = JSON.parse(canonicalize(value));
+    }
+    result[key] = value;
+  }
+  return JSON.stringify(result);
+};
 
 /**
- * Controller: Verify a credential's integrity and status
- * Performs the following checks:
- * 1. Credential existence in MongoDB
- * 2. Revocation status
- * 3. Expiration
- * 4. Blockchain hash integrity
- * 5. Optional JWT verification
- *
+ * Normalize issuanceDate for deterministic hashing
+ * Removes milliseconds to match issuance canonicalization
+ * @param {string|Date} date
+ * @returns {string} ISO string without milliseconds
+ */
+const normalizeIssuanceDate = (date) => {
+  if (!date) return new Date().toISOString().split('.')[0] + 'Z';
+  return new Date(date).toISOString().split('.')[0] + 'Z';
+};
+
+/**
+ * Convert string or hash to 0x-prefixed bytes32 for Solidity
+ * @param {string} input 
+ * @returns {string} 0x-prefixed 32-byte hex
+ */
+const toBytes32 = (input) => {
+  if (!input) throw new Error('Cannot convert empty value to bytes32');
+  let hex;
+  if (/^0x[0-9a-fA-F]+$/.test(input)) {
+    hex = input.slice(2);
+  } else {
+    hex = crypto.createHash('sha256').update(input.toString()).digest('hex');
+  }
+  hex = hex.padStart(64, '0').slice(0, 64);
+  return '0x' + hex;
+};
+
+/**
+ * Safely serialize numeric or BigInt values
+ * @param {any} value
+ * @returns {any|string} Serialized value
+ */
+const safeSerialize = (value) => (typeof value === 'bigint' ? value.toString() : value);
+
+/**
+ * Controller: Verify a credential
  * @route POST /api/credentials/verify
  * @body { credentialId: string }
  * @returns JSON { success: boolean, message: string, data: object }
@@ -28,18 +93,21 @@ function canonicalize(obj) {
 exports.verifyCredential = async (req, res) => {
   try {
     const { credentialId } = req.body;
-
     if (!credentialId) {
       return res.status(400).json({ success: false, message: 'Credential ID is required.' });
     }
 
-    // Fetch credential from MongoDB
+    // --------------------------
+    // Fetch credential from database
+    // --------------------------
     const credential = await Credential.findOne({ credentialId }).populate('issuer', 'name department');
     if (!credential) {
       return res.status(404).json({ success: false, message: 'Credential not found.' });
     }
 
+    // --------------------------
     // Check revocation
+    // --------------------------
     if (credential.credentialStatus === 'REVOKED') {
       return res.json({
         success: false,
@@ -53,7 +121,9 @@ exports.verifyCredential = async (req, res) => {
       });
     }
 
+    // --------------------------
     // Check expiration
+    // --------------------------
     if (credential.expiryDate && new Date() > credential.expiryDate) {
       return res.json({
         success: false,
@@ -66,58 +136,80 @@ exports.verifyCredential = async (req, res) => {
       });
     }
 
-    /** -----------------------------
-     * Recalculate VC hash deterministically
-     * For JWT-based VCs, hash the JWT string
-     * ----------------------------- */
-    const vcJwt = credential.vcData?.vcJwt;
-    if (!vcJwt) {
-      return res.status(500).json({ success: false, message: 'Credential JWT missing.' });
+    // --------------------------
+    // Recalculate deterministic credential hash
+    // Normalize issuanceDate and canonicalize payload to prevent mismatch
+    // --------------------------
+    const vcPayload = credential.vcData?.payload;
+    if (!vcPayload) {
+      return res.status(500).json({ success: false, message: 'VC payload missing for verification.' });
     }
 
-    const recalculatedHashHex = crypto.createHash('sha256').update(vcJwt).digest('hex');
-    const recalculatedHashBytes32 = '0x' + recalculatedHashHex;
+    // Ensure issuanceDate matches normalized format
+    vcPayload.issuanceDate = normalizeIssuanceDate(vcPayload.issuanceDate);
 
-    /** -----------------------------
-     * Fetch hash from blockchain
-     * ----------------------------- */
-    const onChainHashBytes32 = await blockchainService.getCredentialHash(credential.credentialId);
+    // Canonicalize the payload for deterministic hashing
+    const canonicalPayload = canonicalize(vcPayload);
+    const recalculatedHashBytes32 = toBytes32(canonicalPayload);
 
-    /** -----------------------------
-     * Compare blockchain hash with recalculated hash
-     * ----------------------------- */
-    const isValid = recalculatedHashBytes32.toLowerCase() === onChainHashBytes32.toLowerCase();
+    // --------------------------
+    // Blockchain verification
+    // --------------------------
+    let blockchainValid = false;
+    let statusCodeSafe = null;
+    try {
+      const [onChainHashBytes32, statusCode] = await blockchainService.getCredentialHashAndStatus(credentialId);
+      blockchainValid = onChainHashBytes32 === recalculatedHashBytes32 && statusCode === 0;
+      statusCodeSafe = safeSerialize(statusCode);
+    } catch (err) {
+      console.warn('Blockchain verification failed:', err.message);
+    }
 
-    /** -----------------------------
-     *  Verify JWT integrity and signature
-     * ----------------------------- */
+    // --------------------------
+    // Fetch ZKP Merkle root from blockchain (if exists)
+    // --------------------------
+    let merkleRoot = null;
+    try {
+      const onChainData = await blockchainService.contract.getCertificate(credentialId);
+      merkleRoot = safeSerialize(onChainData.merkleRoot);
+    } catch (err) {
+      console.warn('Could not fetch ZKP Merkle root:', err.message);
+    }
+
+    // --------------------------
+    // Vault JWT signature verification
+    // --------------------------
     let jwtVerified = false;
     try {
-      const decoded = await verifyCredentialJwt(vcJwt);
-      jwtVerified = !!decoded;
+      const vcJwt = credential.vcData?.vcJwt;
+      if (vcJwt) {
+        const decoded = await verifyCredentialJwt(vcJwt);
+        jwtVerified = !!decoded;
+      }
     } catch (err) {
       console.warn('JWT verification failed:', err.message);
     }
 
-    /** -----------------------------
-     * Log verification attempt
-     * ----------------------------- */
+    // --------------------------
+    // Log verification attempt
+    // --------------------------
+    credential.verificationLogs = credential.verificationLogs || [];
     credential.verificationLogs.push({
       verifiedBy: req.user?.id || 'anonymous',
       verifiedAt: new Date(),
-      result: isValid ? 'VALID' : 'HASH_MISMATCH',
+      result: blockchainValid && jwtVerified ? 'VALID' : 'INVALID',
       jwtVerified
     });
     await credential.save();
 
-    /** -----------------------------
-     * Respond with verification result
-     * ----------------------------- */
-    res.json({
-      success: isValid && jwtVerified,
-      message: isValid && jwtVerified
-        ? 'Credential is valid, untampered, and JWT signature verified.'
-        : 'Credential verification failed. Possible tampering or invalid JWT.',
+    // --------------------------
+    // Respond with verification result
+    // --------------------------
+    return res.json({
+      success: blockchainValid && jwtVerified,
+      message: blockchainValid && jwtVerified
+        ? 'Credential is valid: blockchain hash matches, JWT signature verified, and untampered.'
+        : 'Credential verification failed: possible tampering, invalid JWT, or blockchain mismatch.',
       data: {
         credentialId: credential.credentialId,
         type: credential.type,
@@ -127,19 +219,21 @@ exports.verifyCredential = async (req, res) => {
         holderDID: credential.holderDID,
         ipfsCID: credential.ipfsCID,
         blockchainTxHash: credential.blockchainTxHash,
-        onChainHash: onChainHashBytes32,
         recalculatedHash: recalculatedHashBytes32,
+        blockchainValid,
+        statusCode: statusCodeSafe,
         jwtVerified,
-        result: isValid && jwtVerified ? 'VALID' : 'INVALID',
-        issuedAt: credential.issuedAt,
+        result: blockchainValid && jwtVerified ? 'VALID' : 'INVALID',
         status: credential.credentialStatus,
-        vcJwt
+        issuedAt: credential.issuedAt,
+        merkleRoot,       // ZKP Merkle root for selective disclosure
+        vcPayload
       }
     });
 
   } catch (error) {
-    console.error('Blockchain Verify Credential Error:', error);
-    res.status(500).json({
+    console.error('Credential Verification Error:', error);
+    return res.status(500).json({
       success: false,
       message: 'Server error during credential verification.',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined

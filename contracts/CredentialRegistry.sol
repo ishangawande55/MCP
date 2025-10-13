@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-/// @title CredentialRegistry 
-/// @notice Anchors credential hashes + IPFS CIDs with DID-aware metadata, issuance, revocation, and verification helpers.
-/// @dev Uses OpenZeppelin AccessControl + Pausable + ReentrancyGuard for safety.
-///      Designed to be gas-conscious while still human-readable: credentialId is supplied as string, stored internally keyed by keccak256.
+/// @title CredentialRegistry
+/// @notice Anchors credential hashes + IPFS CIDs + ZKP Merkle roots with DID-aware metadata, issuance, revocation, and verification helpers.
+/// @dev Extends existing OpenZeppelin AccessControl + Pausable + ReentrancyGuard safety.
+///      CredentialId is supplied as string, internally keyed by keccak256 for gas efficiency.
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
@@ -24,6 +24,7 @@ contract CredentialRegistry is AccessControl, Pausable, ReentrancyGuard {
     struct Credential {
         bytes32 credentialHash;   // SHA-256 hash of canonical credential bytes
         string ipfsCID;           // IPFS CID (or other content-address)
+        bytes32 merkleRoot;       // Merkle root from ZKP selective disclosure
         address issuerAddress;    // on-chain account who issued (municipal commissioner)
         string issuerDID;         // issuer DID 
         string holderDID;         // holder DID 
@@ -47,6 +48,7 @@ contract CredentialRegistry is AccessControl, Pausable, ReentrancyGuard {
         string issuerDID,
         string holderDID,
         string ipfsCID,
+        bytes32 merkleRoot,
         uint256 timestamp,
         uint256 expiry,
         string schema
@@ -72,11 +74,12 @@ contract CredentialRegistry is AccessControl, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @notice Issue a new credential
+     * @notice Issue a new credential with optional ZKP Merkle root
      * @dev Only accounts with ISSUER_ROLE can call this.
      * @param _credentialId Human-readable ID (e.g., "vc:trade-license:0001")
-     * @param _credentialHash SHA-256 hash of canonical credential bytes (bytes32)
+     * @param _credentialHash SHA-256 hash of canonical credential bytes
      * @param _ipfsCID IPFS CID where full VC/ PDF is stored
+     * @param _merkleRoot Merkle root from selective disclosure (bytes32)
      * @param _issuerDID DID string of issuer (e.g., did:mcp:comm001)
      * @param _holderDID DID string of holder (e.g., did:mcp:ishan123)
      * @param _expiry expiry timestamp (0 = never)
@@ -86,6 +89,7 @@ contract CredentialRegistry is AccessControl, Pausable, ReentrancyGuard {
         string calldata _credentialId,
         bytes32 _credentialHash,
         string calldata _ipfsCID,
+        bytes32 _merkleRoot,
         string calldata _issuerDID,
         string calldata _holderDID,
         uint256 _expiry,
@@ -97,6 +101,7 @@ contract CredentialRegistry is AccessControl, Pausable, ReentrancyGuard {
         credentials[idHash] = Credential({
             credentialHash: _credentialHash,
             ipfsCID: _ipfsCID,
+            merkleRoot: _merkleRoot,
             issuerAddress: msg.sender,
             issuerDID: _issuerDID,
             holderDID: _holderDID,
@@ -116,6 +121,7 @@ contract CredentialRegistry is AccessControl, Pausable, ReentrancyGuard {
             _issuerDID,
             _holderDID,
             _ipfsCID,
+            _merkleRoot,
             block.timestamp,
             _expiry,
             _schema
@@ -178,7 +184,7 @@ contract CredentialRegistry is AccessControl, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @notice Get full credential metadata (useful for verifiers/off-chain indexers)
+     * @notice Get full credential metadata including ZKP Merkle root
      */
     function getCertificate(string calldata _credentialId)
         external
@@ -186,6 +192,7 @@ contract CredentialRegistry is AccessControl, Pausable, ReentrancyGuard {
         returns (
             bytes32 credentialHash,
             string memory ipfsCID,
+            bytes32 merkleRoot,
             address issuerAddress,
             string memory issuerDID,
             string memory holderDID,
@@ -204,6 +211,7 @@ contract CredentialRegistry is AccessControl, Pausable, ReentrancyGuard {
         return (
             cred.credentialHash,
             cred.ipfsCID,
+            cred.merkleRoot,
             cred.issuerAddress,
             cred.issuerDID,
             cred.holderDID,
@@ -220,37 +228,33 @@ contract CredentialRegistry is AccessControl, Pausable, ReentrancyGuard {
      * Management: Issuers & Pausing
      * --------------------------- */
 
-    /// @notice Grant ISSUER_ROLE to an address (admin only)
     function addIssuer(address _issuer) external onlyRole(DEFAULT_ADMIN_ROLE) {
         grantRole(ISSUER_ROLE, _issuer);
         emit IssuerAdded(_issuer);
     }
 
-    /// @notice Revoke ISSUER_ROLE from an address (admin only)
     function removeIssuer(address _issuer) external onlyRole(DEFAULT_ADMIN_ROLE) {
         revokeRole(ISSUER_ROLE, _issuer);
         emit IssuerRemoved(_issuer);
     }
 
-    /// @notice Pause contract (admin or pauser)
     function pause() external onlyRole(PAUSER_ROLE) {
         _pause();
     }
 
-    /// @notice Unpause contract (admin or pauser)
     function unpause() external onlyRole(PAUSER_ROLE) {
         _unpause();
     }
 
     /* ---------------------------
-     * Batch helpers (gas: use cautiously)
+     * Batch helpers
      * --------------------------- */
 
-    /// @notice Batch issuance (array lengths must match). Callable by issuer.
     function batchIssue(
         string[] calldata _credentialIds,
         bytes32[] calldata _credentialHashes,
         string[] calldata _ipfsCIDs,
+        bytes32[] calldata _merkleRoots,
         string[] calldata _issuerDIDs,
         string[] calldata _holderDIDs,
         uint256[] calldata _expiries,
@@ -260,6 +264,7 @@ contract CredentialRegistry is AccessControl, Pausable, ReentrancyGuard {
         require(
             len == _credentialHashes.length &&
             len == _ipfsCIDs.length &&
+            len == _merkleRoots.length &&
             len == _issuerDIDs.length &&
             len == _holderDIDs.length &&
             len == _expiries.length &&
@@ -273,6 +278,7 @@ contract CredentialRegistry is AccessControl, Pausable, ReentrancyGuard {
             credentials[idHash] = Credential({
                 credentialHash: _credentialHashes[i],
                 ipfsCID: _ipfsCIDs[i],
+                merkleRoot: _merkleRoots[i],
                 issuerAddress: msg.sender,
                 issuerDID: _issuerDIDs[i],
                 holderDID: _holderDIDs[i],
@@ -292,6 +298,7 @@ contract CredentialRegistry is AccessControl, Pausable, ReentrancyGuard {
                 _issuerDIDs[i],
                 _holderDIDs[i],
                 _ipfsCIDs[i],
+                _merkleRoots[i],
                 block.timestamp,
                 _expiries[i],
                 _schemas[i]
@@ -299,7 +306,6 @@ contract CredentialRegistry is AccessControl, Pausable, ReentrancyGuard {
         }
     }
 
-    /// @notice Batch revocation. Caller must have ISSUER_ROLE.
     function batchRevoke(string[] calldata _credentialIds, string[] calldata _reasons)
         external
         whenNotPaused
@@ -320,11 +326,7 @@ contract CredentialRegistry is AccessControl, Pausable, ReentrancyGuard {
         }
     }
 
-    /* ---------------------------
-     * Gas/utility helpers
-     * --------------------------- */
-
-    /// @notice Returns stored credential hash for an idHash (bytes32). Useful for off-chain verification caching.
+    /// @notice Returns stored credential hash for an idHash
     function getCredentialHashByIdHash(bytes32 idHash) external view returns (bytes32) {
         require(credentials[idHash].exists, "Credential does not exist");
         return credentials[idHash].credentialHash;
