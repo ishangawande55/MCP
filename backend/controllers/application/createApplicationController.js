@@ -102,7 +102,7 @@ const createApplication = async (req, res) => {
       userId: user._id,
       status: APPLICATION_STATUS.PENDING,
       supportingDocuments: supportingDocuments || [],
-      disclosedFields, // Store applicant's disclosure choices in schema
+      disclosedFields, 
       history: [
         {
           action: 'CREATED',
@@ -142,9 +142,9 @@ const createApplication = async (req, res) => {
     try {
       const zkpResult = await ZKPService.generateProofFromApplication(applicationData);
 
-      applicationData.zkpProof = zkpResult.proof;
-      applicationData.publicSignals = zkpResult.publicSignals;
-      applicationData.merkleRoot = zkpResult.merkleRoot;
+      applicationData.initialZkpProof = zkpResult.proof;
+      applicationData.initialPublicSignals = zkpResult.publicSignals;
+      applicationData.initialMerkleRoot = zkpResult.merkleRoot;
     } catch (zkError) {
       console.error('ZKP Generation Error:', zkError);
       return res.status(400).json({
@@ -180,8 +180,9 @@ const createApplication = async (req, res) => {
           type: application.type,
           department: application.department,
           status: application.status,
-          merkleRoot: application.merkleRoot || null,
-          disclosedFields: application.disclosedFields, // Returned for applicant acknowledgment
+          merkleRoot: application.initialMerkleRoot || null,
+          initialZkpProof: application.initialZkpProof,
+          disclosedFields: application.disclosedFields, 
           createdAt: application.createdAt,
           ...typeDetails,
         },

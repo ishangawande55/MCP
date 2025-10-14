@@ -2,18 +2,21 @@
  * @file processApplication.js
  * @author Ishan Gawande
  * @description
- * Controller to handle approval/rejection of municipal applications with:
+ * Controller to handle approval/rejection of municipal applications.
+ * Integrates:
  *  - Zero-Knowledge Proofs (ZKPs) for selective disclosure
  *  - Vault-signed Verifiable Credentials (VC)
  *  - IPFS storage of VC JWT
  *  - Blockchain anchoring of deterministic VC payload hash and Merkle root
  *
- * Key Features:
- *  - Generates canonical VC payload for deterministic hashing
- *  - Normalizes issuanceDate for consistent hashing
- *  - Stores selective disclosure fields only
- *  - Integrates ZKP proof generation and Merkle root anchoring
- *  - Maintains full audit trail of approval/rejection actions
+ * Responsibilities:
+ *  - Validate commissioner authorization
+ *  - Prevent duplicate credential issuance
+ *  - Generate canonical VC payload for deterministic hashing
+ *  - Generate ZKP proof and Merkle root for selective disclosure
+ *  - Sign VC via Vault and upload JWT to IPFS
+ *  - Anchor VC on blockchain and store transaction details
+ *  - Maintain detailed audit trail for approvals/rejections
  */
 
 const Application = require('../../models/Application');
@@ -28,7 +31,8 @@ const ZKPService = require('../../services/ZKPService');
 const SUPPORTED_TYPES = ['BIRTH', 'DEATH', 'TRADE_LICENSE', 'NOC'];
 
 /**
- * Deterministically canonicalize an object for hashing
+ * Deterministically canonicalize an object for hashing.
+ * Ensures consistent key ordering for blockchain hashes.
  * @param {Object} obj 
  * @returns {string} Canonicalized JSON string
  */
@@ -45,7 +49,7 @@ const canonicalize = (obj) => {
 };
 
 /**
- * Converts a string or hash to 0x-prefixed bytes32 format for Solidity
+ * Converts input string to 0x-prefixed bytes32 hex for Solidity compatibility.
  * @param {string} input 
  * @returns {string} 0x-prefixed 32-byte hex
  */
@@ -62,7 +66,7 @@ const toBytes32 = (input) => {
 };
 
 /**
- * Filter an object to include only fields allowed for selective disclosure
+ * Filters an object to include only fields allowed for selective disclosure.
  * @param {Object} details 
  * @param {Array} disclosedFields 
  * @returns {Object} Filtered object
@@ -86,9 +90,7 @@ const processApplication = async (req, res) => {
     const { action, reviewComments } = req.body;
     const applicationId = req.params.id;
 
-    // --------------------------
-    // Fetch application
-    // --------------------------
+    // Fetch application from database
     const application = await Application.findOne({ applicationId });
     if (!application) {
       return res.status(404).json({ success: false, message: 'Application not found.' });
@@ -96,9 +98,7 @@ const processApplication = async (req, res) => {
 
     const commissioner = req.user;
 
-    // --------------------------
-    // Authorization
-    // --------------------------
+    // Authorization check: Only commissioners can process applications
     if (commissioner.role !== 'COMMISSIONER') {
       return res.status(403).json({ success: false, message: 'Only commissioners can process applications.' });
     }
@@ -146,9 +146,7 @@ const processApplication = async (req, res) => {
         });
       }
 
-      // --------------------------
       // Flatten type-specific details for ZKP input
-      // --------------------------
       let typeDetails;
       switch (application.type) {
         case 'BIRTH': typeDetails = application.birthDetails || {}; break;
@@ -160,26 +158,25 @@ const processApplication = async (req, res) => {
       const zkpInput = { ...application.toObject(), disclosedFields: application.disclosedFields || [] };
       Object.assign(zkpInput, typeDetails);
 
-      // --------------------------
       // Generate ZKP proof and Merkle root
-      // --------------------------
       let zkpResult;
       try {
         zkpResult = await ZKPService.generateProofFromApplication(zkpInput);
-        application.zkpProof = zkpResult.proof;
-        application.publicSignals = zkpResult.publicSignals;
+
+        // Save final proof & signals according to new schema
+        application.finalZkpProof = zkpResult.proof;
+        application.finalPublicSignals = zkpResult.publicSignals;
         application.merkleRoot = zkpResult.merkleRoot;
+
       } catch (zkError) {
         console.error('ZKP Generation Error:', zkError);
         return res.status(400).json({ success: false, message: 'ZKP generation failed', error: zkError.message });
       }
 
-      // --------------------------
       // Filter VC payload for selective disclosure
-      // --------------------------
       const disclosedDetails = filterDisclosedFields(typeDetails, application.disclosedFields);
 
-      // Normalize issuanceDate to seconds to prevent hash mismatch
+      // Normalize issuanceDate for consistent hash
       const issuanceDate = new Date().toISOString().split('.')[0] + 'Z';
 
       const vcPayload = {
@@ -198,9 +195,7 @@ const processApplication = async (req, res) => {
         }
       };
 
-      // --------------------------
       // Vault signing
-      // --------------------------
       const vaultKeyName = commissioner.vault?.keyName;
       const vaultToken = commissioner.vault?.token;
       if (!vaultKeyName || !vaultToken) {
@@ -208,24 +203,22 @@ const processApplication = async (req, res) => {
       }
       const vcJwt = await signVCWithVault(vcPayload, vaultKeyName, vaultToken);
 
-      // --------------------------
       // Upload VC JWT to IPFS
-      // --------------------------
       const ipfsResult = await ipfsService.uploadJSON({ vcJwt });
       const ipfsCID = typeof ipfsResult === 'string' ? ipfsResult : ipfsResult.cid;
 
-      // --------------------------
       // Generate deterministic blockchain hash
-      // --------------------------
       const canonicalPayload = canonicalize(vcPayload);
       const payloadHashBytes32 = toBytes32(canonicalPayload);
       const merkleRootBytes32 = toBytes32(application.merkleRoot);
 
-      // --------------------------
       // Blockchain issuance
-      // --------------------------
       const credentialId = `cred-${application.applicationId}-${Date.now()}`;
-      const departmentRoleMap = { 'HEALTHCARE': 'HEALTHCARE_COMMISSIONER', 'LICENSE': 'LICENSES_COMMISSIONER', 'NOC': 'NOC_COMMISSIONER' };
+      const departmentRoleMap = {
+        'HEALTHCARE': 'HEALTHCARE_COMMISSIONER',
+        'LICENSE': 'LICENSES_COMMISSIONER',
+        'NOC': 'NOC_COMMISSIONER'
+      };
       const role = departmentRoleMap[application.department] || 'ADMIN';
       blockchainService.setSigner(role);
 
@@ -240,15 +233,13 @@ const processApplication = async (req, res) => {
         `${application.type}_Credential`
       );
 
-      // --------------------------
-      // Save credential in DB
-      // --------------------------
+      // Save credential in database
       const newCredential = new Credential({
         applicationId,
         credentialId,
         type: application.type,
-        vcData: { vcJwt, payload: vcPayload }, // Store canonical payload
-        canonicalPayload, // Store exact payload used for blockchain hash
+        vcData: { vcJwt, payload: vcPayload },
+        canonicalPayload,
         vcSignature: 'VAULT_SIGNED',
         ipfsCID,
         credentialHash: payloadHashBytes32,
@@ -264,9 +255,7 @@ const processApplication = async (req, res) => {
       });
       await newCredential.save();
 
-      // --------------------------
-      // Update application
-      // --------------------------
+      // Update application with issuance details
       application.status = APPLICATION_STATUS.APPROVED;
       application.reviewComments = reviewComments || '';
       application.credential = newCredential._id;
@@ -281,9 +270,7 @@ const processApplication = async (req, res) => {
       });
       await application.save();
 
-      // --------------------------
-      // Response
-      // --------------------------
+      // Send success response
       return res.json({
         success: true,
         message: 'Application approved and credential issued successfully.',
@@ -305,6 +292,7 @@ const processApplication = async (req, res) => {
       });
     }
 
+    // Invalid action
     return res.status(400).json({ success: false, message: 'Invalid action. Use APPROVE or REJECT.' });
 
   } catch (error) {

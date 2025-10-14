@@ -9,6 +9,7 @@
     "create-admin": "node scripts/createAdmin.js",
     "test:flow": "node scripts/testFlow.js",
     "test:ipfs": "node scripts/testIPFS.js",
+    "test:zkp": "node scripts/zkpTest.js",
     "test:blockchain": "node scripts/testBlockchain.js",
     "test:all": "npm run test:ipfs && npm run test:blockchain && npm run test:flow",
     "test": "echo \"Error: no test specified\" && exit 1"

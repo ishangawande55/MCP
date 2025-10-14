@@ -2,17 +2,14 @@
  * @file Application.js
  * @author Ishan Gawande
  * @description
+ * -----------------------------------------------------------------------------
  * MongoDB schema for municipal applications (Birth, Death, Trade License, NOC).
- * Supports selective disclosure (SD) flags for sensitive fields to enable
- * zero-knowledge proof (ZKP) generation.
- *
- * Each application tracks:
- *  - Applicant details
- *  - Type-specific details (birth, death, trade, noc)
- *  - Disclosure flags for ZKP
- *  - Supporting documents
- *  - Workflow status and history
- *  - Assignment to officers/commissioners
+ * Fully supports selective disclosure (SD) and Zero-Knowledge Proof (ZKP) lifecycle:
+ *  - initial proof generation
+ *  - intermediate proofs (if any)
+ *  - final proof for issuance
+ *  - corresponding public signals
+ * -----------------------------------------------------------------------------
  */
 
 const mongoose = require("mongoose");
@@ -25,15 +22,8 @@ const applicationSchema = new mongoose.Schema(
     // ---------------------
     // Core Identifiers
     // ---------------------
-    applicationId: {
-      type: String,
-      required: true,
-      unique: true,
-    },
-    credentialId: {
-      type: String,
-      ref: "Credential",
-    },
+    applicationId: { type: String, required: true, unique: true },
+    credentialId: { type: String, ref: "Credential" },
     type: {
       type: String,
       enum: ["BIRTH", "DEATH", "TRADE_LICENSE", "NOC"],
@@ -49,7 +39,7 @@ const applicationSchema = new mongoose.Schema(
     // Applicant Details
     // ---------------------
     applicant: {
-      userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: false },
+      userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
       name: { type: String, required: true },
       email: { type: String, required: true },
       phone: { type: String, required: true },
@@ -58,7 +48,7 @@ const applicationSchema = new mongoose.Schema(
     },
 
     // ---------------------
-    // Type-specific Fields
+    // Type-specific Details
     // ---------------------
     birthDetails: {
       childName: String,
@@ -87,13 +77,8 @@ const applicationSchema = new mongoose.Schema(
     },
 
     // ---------------------
-    // Selective Disclosure Flags for ZKP
+    // Selective Disclosure Flags
     // ---------------------
-    /**
-     * Each field marked as 1 = disclosed, 0 = hidden
-     * This maps directly to the structure of sensitive data sections
-     * and will be used for generating ZKP proofs.
-     */
     disclosedFlags: {
       birthDetails: {
         childName: { type: Number, default: 1 },
@@ -121,18 +106,17 @@ const applicationSchema = new mongoose.Schema(
         applicantType: { type: Number, default: 1 },
       },
     },
-    disclosedFields: {
-      type: [String],
-      default: [],
-    },
+    disclosedFields: { type: [String], default: [] },
 
     // ---------------------
     // Supporting Documents
     // ---------------------
-    supportingDocuments: [{ name: String, ipfsCID: String }],
+    supportingDocuments: [
+      { name: String, ipfsCID: String }
+    ],
 
     // ---------------------
-    // Application Workflow Status
+    // Workflow Status
     // ---------------------
     status: {
       type: String,
@@ -153,7 +137,7 @@ const applicationSchema = new mongoose.Schema(
     assignedOfficer: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     forwardedCommissioner: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     forwardedCommissionerDID: { type: String },
-    forwardedCommissionerPublicKey: { type: String }, // added for issuance
+    forwardedCommissionerPublicKey: { type: String },
     forwardedAt: { type: Date },
 
     // ---------------------
@@ -164,14 +148,28 @@ const applicationSchema = new mongoose.Schema(
     credential: { type: mongoose.Schema.Types.ObjectId, ref: "Credential" },
 
     // ---------------------
-    // ZKP & SD Integration
+    // ZKP & Selective Disclosure Integration
     // ---------------------
-    zkProof: { type: Object, required: false },       // ZKP proof generated post-submission
-    publicSignals: { type: [String], required: false }, // Public signals from ZKP
-    merkleRoot: { type: String, required: false },   // Root to be anchored on blockchain
+    /**
+     * Multiple ZKP proofs lifecycle:
+     * - initialZkpProof: proof generated at submission
+     * - intermediateZkpProof: optional intermediate proofs
+     * - finalZkpProof: final proof for issuance / selective disclosure
+     * 
+     * Public signals must match corresponding proofs.
+     */
+    initialZkpProof: { type: Object, required: false },
+    intermediateZkpProof: { type: Object, required: false },
+    finalZkpProof: { type: Object, required: false },
+
+    initialPublicSignals: { type: [String], required: false },
+    intermediatePublicSignals: { type: [String], required: false },
+    finalPublicSignals: { type: [String], required: false },
+
+    merkleRoot: { type: String, required: false }, // Anchored root for blockchain verification
 
     // ---------------------
-    // Application History
+    // Application History & Audit
     // ---------------------
     history: [
       {
