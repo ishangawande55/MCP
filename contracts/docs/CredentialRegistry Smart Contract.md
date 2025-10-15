@@ -6,7 +6,7 @@
 
 ## 🏗️ Architecture Overview
 
-![Smart Contarct Architecture](Architecture:Smart-Contract.png)
+![Smart Contarct Architecture](diagrams/Architecture:Smart-Contract.png)
 
 ## 🎯 Key Features
 
@@ -20,11 +20,11 @@
 
 ## 📊 Contract Flow
 
-![Contract Flow](Flow:Smart-contract.png)
+![Contract Flow](diagrams/Flow:Smart-contract.png)
 
 ## 🏷️ Roles and Permissions
 
-![Roles and Permission](Roles&Permission:Smart-contract.png)
+![Roles and Permission](diagrams/Roles&Permission:Smart-contract.png)
 
 ## 📝 Credential Structure
 
@@ -50,7 +50,7 @@ struct Credential {
 
 ### Issuance Flow
 
-![Issuance Flow](Issuance:Smart-contract.png)
+![Issuance Flow](diagrams/Issuance:Smart-contract.png)
 
 **Function**: `issueCertificate()`
 - **Access**: `ISSUER_ROLE` only
@@ -64,7 +64,7 @@ struct Credential {
 
 ### Verification Flow
 
-![Verification Flow](Verification:Smart-contract.png)
+![Verification Flow](diagrams/Verification:Smart-contract.png)
 
 **Function**: `verifyCertificate()`
 - **Returns**: `(bool isValid, uint8 statusCode)`
