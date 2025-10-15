@@ -1,6 +1,7 @@
 /**
  * Vault Automation Service
  * -------------------------
+ * @author Ishan Gawande
  * Handles automated creation of:
  *  - Transit signing keys per commissioner
  *  - Vault policies with minimal privileges
