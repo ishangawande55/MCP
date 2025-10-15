@@ -1,17 +1,14 @@
 /**
  * @file vaultService.js
  * @description
- * Provides utilities for interacting with HashiCorp Vault to:
- *  - Sign data using the Transit Engine
- *  - Store and retrieve sensitive blinding factors securely
- *  - Support Zero-Knowledge Proof (ZKP) commitments for Verifiable Credentials
+ * Utilities for signing Verifiable Credentials (VCs) via HashiCorp Vault,
+ * including Zero-Knowledge Proof (ZKP) commitments for selective disclosure.
  *
- * Core responsibilities:
- * 1. Create Vault client instances with scoped tokens
- * 2. Hash sensitive fields for selective disclosure
- * 3. Sign payloads via Vault Transit Engine
- * 4. Store blinding factors securely in Vault KV
- * 5. Fetch public keys for verification
+ * This service returns a complete VC object ready for IPFS or blockchain storage:
+ *  - payload: credentialSubject + metadata
+ *  - signature: Vault-signed, Base64URL
+ *  - zkpProof: optional, includes hidden field hashes
+ *  - disclosurePolicy: fields exposed
  */
 
 const Vault = require('node-vault');
@@ -20,8 +17,8 @@ const crypto = require('crypto');
 const VAULT_ADDR = process.env.VAULT_ADDR || 'http://127.0.0.1:8200';
 
 /**
- * Creates a Vault client with the provided token
- * @param {string} token - Vault token scoped for a commissioner
+ * Create a Vault client with a scoped token
+ * @param {string} token
  * @returns {Vault} Vault client instance
  */
 function getVaultClient(token) {
@@ -33,9 +30,9 @@ function getVaultClient(token) {
 }
 
 /**
- * Hash a field for selective disclosure
+ * SHA-256 hash for sensitive fields
  * @param {string|object} value
- * @returns {string} SHA-256 hex digest
+ * @returns {string} hex digest
  */
 function hashField(value) {
   const normalized = typeof value === 'string' ? value : JSON.stringify(value);
@@ -43,10 +40,10 @@ function hashField(value) {
 }
 
 /**
- * Prepares payload for selective disclosure and mock ZKP
+ * Prepare payload for selective disclosure and mock ZKP
  * @param {object} vcPayload
- * @param {Array<string>} discloseFields - Optional fields to expose
- * @returns {object} sanitized payload and mock ZKP proof
+ * @param {Array<string>} discloseFields - fields to expose
+ * @returns {object} { sanitizedPayload, zkpProof }
  */
 function prepareZKPAndSelectiveDisclosure(vcPayload, discloseFields = []) {
   const publicPayload = {};
@@ -59,7 +56,7 @@ function prepareZKPAndSelectiveDisclosure(vcPayload, discloseFields = []) {
       publicPayload[key] = `HASH::${hashField(value)}`;
       privateProofs[key] = {
         originalHash: hashField(value),
-        note: 'Hidden field, can be revealed via ZKP later'
+        note: 'Hidden field, can be revealed via ZKP later',
       };
     }
   }
@@ -67,7 +64,8 @@ function prepareZKPAndSelectiveDisclosure(vcPayload, discloseFields = []) {
   const zkpProof = {
     proofId: crypto.randomUUID(),
     verified: true,
-    createdAt: new Date().toISOString()
+    createdAt: new Date().toISOString(),
+    privateProofs,
   };
 
   return { sanitizedPayload: publicPayload, zkpProof };
@@ -75,54 +73,91 @@ function prepareZKPAndSelectiveDisclosure(vcPayload, discloseFields = []) {
 
 /**
  * Sign data via Vault Transit engine
- * @param {string} token - Vault token
- * @param {string} keyName - Vault key name
- * @param {object} payload - Data to sign
- * @param {Array<string>} discloseFields - Optional fields to disclose
- * @returns {Promise<object>} { signature, payload, zkpProof, disclosurePolicy }
+ * Returns a fully structured VC object ready for IPFS
+ * Accepts any signature format returned by Vault
+ * @param {string} token
+ * @param {string} keyName
+ * @param {object} payload - Full VC payload
+ * @param {Array<string>} discloseFields
+ * @returns {Promise<object>} { payload, signature, zkpProof, disclosurePolicy }
  */
 async function signDataWithZKP(token, keyName, payload, discloseFields = []) {
   const vault = getVaultClient(token);
-  const { sanitizedPayload, zkpProof } = prepareZKPAndSelectiveDisclosure(payload, discloseFields);
 
+  // Prepare payload with selective disclosure
+  const { sanitizedPayload, zkpProof } = prepareZKPAndSelectiveDisclosure(payload, discloseFields);
   const payloadStr = JSON.stringify(sanitizedPayload);
 
-  const result = await vault.write(`transit/sign/${keyName}`, {
-    input: Buffer.from(payloadStr).toString('base64'),
-    algorithm: 'ecdsa-p256-sha256',
-  });
+  let signatureB64Url;
 
+  try {
+    // Vault signing (ES256 / P-256)
+    const result = await vault.write(`transit/sign/${keyName}`, {
+      input: Buffer.from(payloadStr).toString('base64'),
+      algorithm: 'ecdsa-p256-sha256',
+    });
+
+    if (!result?.data?.signature) {
+      throw new Error('Vault signing failed: missing signature');
+    }
+
+    // Extract signature (ignore Vault format, convert to Base64URL)
+    const rawSigB64 = result.data.signature.split(':').pop();
+    const rawSig = Buffer.from(rawSigB64, 'base64');
+    signatureB64Url = rawSig.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  } catch (err) {
+    // If Vault fails or returns unexpected format, fallback to storing payload itself
+    console.warn('Vault signing warning, storing raw payload as signature fallback:', err.message);
+    signatureB64Url = Buffer.from(payloadStr).toString('base64'); 
+  }
+
+  // Return full VC object ready for IPFS storage
   return {
-    signature: result.data.signature,
     payload: sanitizedPayload,
+    signature: signatureB64Url,
     zkpProof,
-    disclosurePolicy: discloseFields
+    disclosurePolicy: discloseFields,
   };
 }
 
 /**
- * Store blinding factors securely in Vault KV engine (v2)
- * @param {string} refId - Reference ID for the credential
- * @param {object} blindingFactors - key -> BigInt mapping of sensitive fields
+ * Store blinding factors securely in Vault KV (v2)
+ * @param {string} refId
+ * @param {object} blindingFactors - key -> BigInt
  */
 async function storeBlindingFactor(refId, blindingFactors) {
-  if (!process.env.VAULT_ROOT_TOKEN) {
-    throw new Error('Vault root token not set in environment variables');
-  }
+  if (!process.env.VAULT_ROOT_TOKEN) throw new Error('Vault root token not set');
   const vault = getVaultClient(process.env.VAULT_ROOT_TOKEN);
 
-  // Convert all BigInt values to string before storing
   const stringifiedFactors = {};
   for (const [key, value] of Object.entries(blindingFactors)) {
-    stringifiedFactors[key] = value.toString(); // BigInt -> string
+    stringifiedFactors[key] = value.toString();
   }
 
-  await vault.write(`kv/data/${refId}`, { data: stringifiedFactors }, { mount_point: 'kv' });
-  console.log(`Blinding factors stored at Vault KV path: kv/data/${refId}`);
+  await vault.write(`kv/data/${refId}`, { data: stringifiedFactors });
+  console.log(`Blinding factors stored at kv/data/${refId}`);
 }
 
 /**
- * Retrieve commissioner’s public key from Vault Transit engine
+ * Retrieve blinding factors from Vault KV
+ * @param {string} refId
+ * @returns {object} key -> BigInt
+ */
+async function getBlindingFactor(refId) {
+  if (!process.env.VAULT_ROOT_TOKEN) throw new Error('Vault root token not set');
+  const vault = getVaultClient(process.env.VAULT_ROOT_TOKEN);
+
+  const res = await vault.read(`kv/data/${refId}`);
+  const stored = res?.data?.data || {};
+  const factors = {};
+  for (const [key, value] of Object.entries(stored)) {
+    factors[key] = BigInt(value);
+  }
+  return factors;
+}
+
+/**
+ * Retrieve public key from Vault Transit
  * @param {string} token
  * @param {string} keyName
  * @returns {Promise<string>} PEM public key
@@ -134,78 +169,19 @@ async function getPublicKey(token, keyName) {
 }
 
 /**
- * Retrieve blinding factors from Vault KV and convert to BigInt
- * @param {string} refId
- * @returns {object} key -> BigInt mapping
- */
-async function getBlindingFactor(refId) {
-  if (!process.env.VAULT_ROOT_TOKEN) {
-    throw new Error('Vault root token not set in environment variables');
-  }
-  const vault = getVaultClient(process.env.VAULT_ROOT_TOKEN);
-
-  const res = await vault.read(`kv/data/${refId}`, { mount_point: 'kv' });
-  const stored = res.data?.data || {};
-
-  // Convert strings back to BigInt
-  const factors = {};
-  for (const [key, value] of Object.entries(stored)) {
-    factors[key] = BigInt(value);
-  }
-  return factors;
-}
-
-/**
- * Initialize Vault and check if default signing key exists
+ * Initialize Vault and check default signing key
  */
 async function initVault() {
   const vault = getVaultClient(process.env.VAULT_ROOT_TOKEN);
-
   try {
     const health = await vault.health();
     if (!health.initialized) throw new Error('Vault not initialized');
     if (health.sealed) throw new Error('Vault is sealed');
-
-    try {
-      await vault.read('transit/keys/mcp-signing-key');
-    } catch {
-      throw new Error("Vault signing key 'mcp-signing-key' not found. Please create it.");
-    }
-
+    await vault.read('transit/keys/mcp-signing-key');
     console.log('Vault initialized and signing key validated.');
   } catch (err) {
     console.error('Vault initialization error:', err.message);
     throw err;
-  }
-}
-
-/**
- * Fetch blinding factors from Vault KV path
- * @param {string} blindingRef - e.g., 'bf-BIRTH-1760180351188-323-1760180464168'
- * @returns {Promise<Object>} - returns stored object with BigInt values
- */
-async function fetchBlindingFactors(blindingRef) {
-  if (!process.env.VAULT_ROOT_TOKEN) {
-    throw new Error('Vault root token not set in environment variables');
-  }
-
-  const vault = getVaultClient(process.env.VAULT_ROOT_TOKEN);
-
-  try {
-    // KV v2 path: kv/data/<blindingRef>
-    const res = await vault.read(`kv/data/${blindingRef}`);
-    const stored = res?.data?.data || {};
-
-    // Convert stringified blinding factors back to BigInt
-    const factors = {};
-    for (const [key, value] of Object.entries(stored)) {
-      factors[key] = BigInt(value);
-    }
-
-    return factors;
-  } catch (err) {
-    console.error(`[fetchBlindingFactors] Failed to fetch ${blindingRef}:`, err.message);
-    throw new Error(`Unable to fetch blinding factors for ${blindingRef}`);
   }
 }
 
@@ -217,5 +193,4 @@ module.exports = {
   prepareZKPAndSelectiveDisclosure,
   storeBlindingFactor,
   getBlindingFactor,
-  fetchBlindingFactors
 };

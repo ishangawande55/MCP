@@ -15,7 +15,7 @@ async function verifyCredentialJwt(vcJwt, issuerDID) {
 
     // Verify the VC JWT
     const verifiedVC = await verifyCredential(vcJwt, { resolver: { resolve: async (did) => ({ didDocument: { verificationMethod: [{ id: `${did}#keys-1`, type: 'EcdsaSecp256k1VerificationKey2019', controller: did, publicKeyHex: ethrDid.address }] } }) } });
-
+console.log(verifiedVC)
     return {
       success: true,
       payload: verifiedVC,

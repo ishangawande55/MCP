@@ -201,10 +201,17 @@ const processApplication = async (req, res) => {
       if (!vaultKeyName || !vaultToken) {
         return res.status(400).json({ success: false, message: 'Vault key/token missing for commissioner.' });
       }
-      const vcJwt = await signVCWithVault(vcPayload, vaultKeyName, vaultToken);
+      const vcJwt = await signVCWithVault(vaultToken, vaultKeyName, vcPayload, application.disclosedFields);
 
-      // Upload VC JWT to IPFS
-      const ipfsResult = await ipfsService.uploadJSON({ vcJwt });
+      // Check if Vault returned something
+      if (!vcJwt) {
+        throw new Error('Vault signing failed. Cannot proceed.');
+      }
+
+      // If vcJwt is an object (not a standard JWT), use it directly
+      const ipfsResult = await ipfsService.uploadJSON(vcJwt);
+
+      console.log('VC uploaded to IPFS:', ipfsResult);
       const ipfsCID = typeof ipfsResult === 'string' ? ipfsResult : ipfsResult.cid;
 
       // Generate deterministic blockchain hash
