@@ -19,17 +19,17 @@ The `BlockchainService` class provides a comprehensive interface for interacting
 
 ## 👥 Role-Based Access Control
 
-![Role Base Acess Control](<RBC Acess.png>)
+![Role Base Acess Control](diagrams/RBC%20Acess.png)
 
 ### Configured Roles
 
-![Configured Role](<Role Configuration.png>)
+![Configured Role](diagrams/Role%20Configuration.png)
 
 ## 🔧 Core Methods
 
 ### Constructor & Initialization
 
-![Constructor Initialization](<Constructor and initialization.png>)
+![Constructor Initialization](diagrams/Constructor%20and%20initialization.png)
 
 **Initialization Flow:**
 ```javascript
@@ -74,7 +74,7 @@ await blockchainService.issueCredential(...medicalCredentialData);
 
 ### Data Transformation Engine
 
-![Data Transformation Engine](<Data Transformation Engine.png>)
+![Data Transformation Engine](diagrams/Data%20Transformation%20Engine.png)
 
 **Method**: `_toBytes32(value)`
 ```javascript
@@ -108,7 +108,7 @@ _toBytes32(value) {
 
 ### Single Credential Issuance
 
-![Single Credential Issuance](<Single Credential Issuance.png>)
+![Single Credential Issuance](diagrams/Single%20Credential%20Issuance.png)
 
 **Method**: `issueCredential()`
 ```javascript
@@ -168,7 +168,7 @@ async verifyCredential(credentialId, documentHash) {
 
 ### Batch Credential Issuance
 
-![Batch Credential Issuance](<Batch Credential Issuance.png>)
+![Batch Credential Issuance](diagrams/Batch%20Credential%20Issuance.png)
 
 **Method**: `batchIssue()`
 ```javascript
