@@ -173,17 +173,24 @@ const processApplication = async (req, res) => {
         return res.status(400).json({ success: false, message: 'ZKP generation failed', error: zkError.message });
       }
 
-      // Filter VC payload for selective disclosure
+      // --------------------------
+      // Prepare selective disclosure details
+      // --------------------------
       const disclosedDetails = filterDisclosedFields(typeDetails, application.disclosedFields);
 
       // Normalize issuanceDate for consistent hash
       const issuanceDate = new Date().toISOString().split('.')[0] + 'Z';
 
+      // Build canonical VC payload according to W3C
       const vcPayload = {
         "@context": ["https://www.w3.org/2018/credentials/v1"],
-        id: `vc-${application.applicationId}`,
-        type: ["VerifiableCredential", `${application.type}_Credential`],
-        issuer: { id: commissioner.did, name: commissioner.name, department: commissioner.department },
+        id: `${application.applicationId}`,
+        type: ["VerifiableCredential", `${application.type}Credential`],
+        issuer: {
+          id: commissioner.did,
+          name: commissioner.name,
+          department: commissioner.department
+        },
         issuanceDate,
         credentialSubject: {
           id: application.applicant.did,
@@ -195,24 +202,39 @@ const processApplication = async (req, res) => {
         }
       };
 
+      // --------------------------
       // Vault signing
+      // --------------------------
       const vaultKeyName = commissioner.vault?.keyName;
       const vaultToken = commissioner.vault?.token;
+
       if (!vaultKeyName || !vaultToken) {
         return res.status(400).json({ success: false, message: 'Vault key/token missing for commissioner.' });
       }
-      const vcJwt = await signVCWithVault(vaultToken, vaultKeyName, vcPayload, application.disclosedFields);
 
-      // Check if Vault returned something
+      // Get signature only
+      const vcJwt = await signVCWithVault(vaultToken, vaultKeyName, vcPayload, application.disclosedFields);
       if (!vcJwt) {
         throw new Error('Vault signing failed. Cannot proceed.');
       }
 
-      // If vcJwt is an object (not a standard JWT), use it directly
-      const ipfsResult = await ipfsService.uploadJSON(vcJwt);
+      // --------------------------
+      // Prepare full VC object for IPFS
+      // --------------------------
+      const fullVCForIPFS = {
+        payload: vcPayload,             // The complete credential payload
+        signature: vcJwt,         // Vault signature
+        zkpProof: application.finalZkpProof || {},  // ZKP proof (optional)
+        disclosedFields: application.disclosedFields || [] // SD metadata
+      };
 
-      console.log('VC uploaded to IPFS:', ipfsResult);
+      // --------------------------
+      // Upload full VC object to IPFS
+      // --------------------------
+      const ipfsResult = await ipfsService.uploadJSON(fullVCForIPFS);
       const ipfsCID = typeof ipfsResult === 'string' ? ipfsResult : ipfsResult.cid;
+
+      console.log('Full VC uploaded to IPFS:', ipfsCID);
 
       // Generate deterministic blockchain hash
       const canonicalPayload = canonicalize(vcPayload);
