@@ -17,6 +17,7 @@ The **Municipal Credentials Platform (MCP)** is a comprehensive, privacy-preserv
 ## 🏗️ System Architecture
 
 ![System Architecture](diagrams/System-Architecture.png)
+![Minimal Data Flow Diagram](https://drive.google.com/file/d/1neVPEi45hvD72-W9i8aZ9fXsvX5mRNg3/view?usp=sharing)
 
 ## 📁 Project Structure
 
